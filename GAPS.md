@@ -67,6 +67,14 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
 - cloud-init/cidata is taken prebuilt (`--cidata`), not generated; no image
   pull / overlay-new / reset. Borrowed from per-product harnesses today.
 
+### Model economy (how an agent should use these)
+- **Don't read screenshots with an expensive model.** Prefer model-free
+  signals — `find` (tesseract OCR → text+coords), `wait exec` (guest pgrep/
+  journal), `wait screen` (pixel-diff) — to confirm state. Reserve visual
+  judgment for a small/fast model (a Haiku subagent), not the main loop.
+  A `tap-text "<label>"` verb (OCR → click, no model) would make the common
+  case fully model-free.
+
 ### Orchestration & observability
 - Single VM, x86_64/KVM only; no aarch64/TCG, no multi-VM networks.
 - No replayable action transcript (JSONL of shots/keys/clicks).
