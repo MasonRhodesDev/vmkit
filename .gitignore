@@ -1,0 +1,6 @@
+# vmkit runtime artifacts
+.vmkit/
+*.png
+*.ppm
+*.qcow2
+*.log

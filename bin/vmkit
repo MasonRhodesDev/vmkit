@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+# vmkit — drive a QEMU VM as an agent: serial console, QMP control, framebuffer
+# vision (screendump -> PNG), keyboard, and mouse. Guest-OS-agnostic: it works
+# at the QEMU layer (framebuffer, input, serial, QMP), not through anything the
+# guest installs, so the same commands drive Linux, BSD, Windows, an installer
+# ISO, or a kernel that never reaches userspace.
+#
+# Host needs: qemu-system-x86_64, python3 (stdlib only). Optional: an image
+# tool (magick/convert) only as a fallback when the host qemu is too old for
+# PNG screendumps.
+#
+# Config resolves from flags, then env, then defaults:
+#   --overlay PATH     VMKIT_OVERLAY     disk image to boot (required for `up`)
+#   --cidata PATH      VMKIT_CIDATA      optional seed ISO (cloud-init, etc.)
+#   --dir PATH         VMKIT_DIR         work dir for sockets/logs/shots
+#                                        (default: <overlay-dir>/.vmkit)
+#   --ssh-port N       VMKIT_SSH_PORT    host port forwarded to guest :22 (2222)
+#   --ssh-user U       VMKIT_SSH_USER    ssh user (default: current $USER)
+#   --ssh-key PATH     VMKIT_SSH_KEY     ssh identity (~/.ssh/id_ed25519)
+#   --mem MB           VMKIT_MEM         guest RAM MiB (4096)
+#   --smp N            VMKIT_SMP         vcpus (4)
+#   --vnc N            VMKIT_VNC         also expose VNC on 127.0.0.1:590N
+#
+# Collaboration: start with `--view vnc` so the agent (QMP: shot/keys/mouse) and
+# the human (a VNC client) drive the SAME running VM together. `vmkit view` opens
+# the human's viewer. `--view gtk` is a native window but only when vmkit is run
+# from a graphical shell; `--view none` (default) is agent-only headless.
+#
+# Commands:
+#   up                       boot with serial+QMP; view per --view (none|vnc[:N]|gtk)
+#   view                     open a VNC client to the shared view (human side)
+#   status                   sockets, ssh reachability, run-state
+#   shot [name]              screendump the framebuffer -> <dir>/<name>.png (prints path)
+#   move X Y                 move pointer to pixel (X,Y)
+#   click [left|right|middle]  click at the current pointer position
+#   tap X Y [button]         move to (X,Y) then click
+#   keys K [K...]            send QMP qcodes (e.g. ret esc tab shift-1 ctrl-alt-f2)
+#   type TEXT                type an ASCII string
+#   serial [N]               print last N lines of the serial/console log (default 60)
+#   ssh [CMD...]             ssh into the guest (interactive if no CMD)
+#   qmp JSON                 raw QMP command object; prints the JSON reply
+#   snapshot NAME            qcow2 internal snapshot (savevm) via QMP
+#   restore NAME             load a snapshot (loadvm) via QMP
+#   down                     graceful powerdown, then kill by pidfile if needed
+#
+# vmkit never uses `pkill -f` (its pattern would match the caller's own shell);
+# it tracks the qemu pid in <dir>/qemu.pid and acts on that.
+set -euo pipefail
+
+# ---- config resolution -------------------------------------------------------
+OVERLAY="${VMKIT_OVERLAY:-}"; CIDATA="${VMKIT_CIDATA:-}"; DIR="${VMKIT_DIR:-}"
+SSH_PORT="${VMKIT_SSH_PORT:-2222}"; SSH_USER="${VMKIT_SSH_USER:-$USER}"
+SSH_KEY="${VMKIT_SSH_KEY:-$HOME/.ssh/id_ed25519}"
+MEM="${VMKIT_MEM:-4096}"; SMP="${VMKIT_SMP:-4}"
+# VIEW controls the human-facing display: none (agent-only, headless),
+# vnc[:N] (shared live view — agent drives QMP, human attaches a VNC client to
+# the SAME running VM), or gtk (a native window; only works when vmkit is run
+# from a graphical shell). vnc is the collaborative default recommendation.
+VIEW="${VMKIT_VIEW:-none}"
+
+args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --overlay) OVERLAY="$2"; shift 2;;
+        --cidata) CIDATA="$2"; shift 2;;
+        --dir) DIR="$2"; shift 2;;
+        --ssh-port) SSH_PORT="$2"; shift 2;;
+        --ssh-user) SSH_USER="$2"; shift 2;;
+        --ssh-key) SSH_KEY="$2"; shift 2;;
+        --mem) MEM="$2"; shift 2;;
+        --smp) SMP="$2"; shift 2;;
+        --view) VIEW="$2"; shift 2;;
+        --vnc) VIEW="vnc:$2"; shift 2;;
+        --) shift; args+=("$@"); break;;
+        *) args+=("$1"); shift;;
+    esac
+done
+set -- "${args[@]}"
+cmd="${1:-status}"; shift || true
+
+[ -n "$DIR" ] || { [ -n "$OVERLAY" ] && DIR="$(dirname "$OVERLAY")/.vmkit" || DIR="$PWD/.vmkit"; }
+mkdir -p "$DIR"
+QMP_SOCK="$DIR/qmp.sock"; SERIAL_LOG="$DIR/serial.log"; PIDFILE="$DIR/qemu.pid"
+KNOWN="$DIR/known_hosts"; VNCFILE="$DIR/vnc"
+
+# ---- QMP helper: negotiate, run one command, print the reply object ----------
+qmp() {
+    python3 - "$QMP_SOCK" "$1" <<'PY'
+import json, socket, sys
+sp, cmd = sys.argv[1], sys.argv[2]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(30); s.connect(sp)
+f = s.makefile("rwb", buffering=0); f.readline()
+f.write(b'{"execute":"qmp_capabilities"}\n'); f.readline()
+f.write((cmd + "\n").encode())
+while True:
+    line = f.readline()
+    if not line: break
+    o = json.loads(line)
+    if "return" in o or "error" in o:
+        print(json.dumps(o)); break
+PY
+}
+
+guest_ssh() {
+    ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN" \
+        -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
+        -p "$SSH_PORT" -i "$SSH_KEY" "$SSH_USER@127.0.0.1" "$@"
+}
+
+# framebuffer WxH from a throwaway screendump (needed to map pixels -> abs axis)
+fb_size() {
+    local tmp="$DIR/.size.png"
+    qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s","format":"png"}}' "$tmp")" >/dev/null 2>&1 || \
+        qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s"}}' "$tmp")" >/dev/null
+    python3 - "$tmp" <<'PY'
+import struct, sys
+d = open(sys.argv[1], "rb").read(33)
+if d[:8] == b"\x89PNG\r\n\x1a\n":
+    w, h = struct.unpack(">II", d[16:24]); print(w, h)
+elif d[:2] == b"P6":                                   # PPM fallback
+    t = open(sys.argv[1], "rb").read(64).split(); print(int(t[1]), int(t[2]))
+PY
+}
+
+case "$cmd" in
+up)
+    [ -n "$OVERLAY" ] && [ -f "$OVERLAY" ] || { echo "vmkit: --overlay PATH required (got '$OVERLAY')" >&2; exit 2; }
+    if [ -S "$QMP_SOCK" ] && qmp '{"execute":"query-status"}' >/dev/null 2>&1; then
+        echo "already up (qmp $QMP_SOCK, ssh $SSH_PORT)"; exit 0; fi
+    rm -f "$QMP_SOCK" "$VNCFILE"; : >"$SERIAL_LOG"
+    case "$VIEW" in
+        none)      disp=(-display none);;
+        gtk)       disp=(-display gtk,show-cursor=on);;
+        vnc|vnc:*) n="${VIEW#vnc}"; n="${n#:}"; n="${n:-0}"
+                   disp=(-display "vnc=127.0.0.1:$n"); echo "$((5900+n))" >"$VNCFILE";;
+        *) echo "vmkit: unknown --view '$VIEW' (none|vnc[:N]|gtk)" >&2; exit 2;;
+    esac
+    cidata=(); [ -n "$CIDATA" ] && cidata=(-drive if=virtio,file="$CIDATA",format=raw,media=cdrom,read-only=on)
+    echo "== vmkit up: $(basename "$OVERLAY")  view=$VIEW  serial=$SERIAL_LOG  qmp=$QMP_SOCK  ssh=$SSH_PORT$([ -f "$VNCFILE" ] && echo "  vnc=127.0.0.1:$(cat "$VNCFILE")")"
+    nice -n 19 qemu-system-x86_64 \
+        -name "vmkit-$(basename "$OVERLAY" .qcow2)" \
+        -machine q35,accel=kvm -cpu host -m "$MEM" -smp "$SMP" \
+        -drive if=virtio,file="$OVERLAY",discard=unmap,detect-zeroes=unmap \
+        "${cidata[@]}" \
+        -netdev user,id=net0,hostfwd=tcp:127.0.0.1:"$SSH_PORT"-:22 \
+        -device virtio-net-pci,netdev=net0 \
+        -vga virtio "${disp[@]}" \
+        -serial file:"$SERIAL_LOG" \
+        -qmp unix:"$QMP_SOCK",server,nowait \
+        -device virtio-tablet-pci -usb -device usb-kbd -audio none \
+        -pidfile "$PIDFILE" &
+    echo "   qemu pid $!"
+    ;;
+status)
+    echo "qmp   : $([ -S "$QMP_SOCK" ] && echo "$QMP_SOCK" || echo absent)"
+    echo "ssh   : 127.0.0.1:$SSH_PORT $(ss -ltn 2>/dev/null | grep -q ":$SSH_PORT " && echo listening || echo down)"
+    [ -S "$QMP_SOCK" ] && echo "state : $(qmp '{"execute":"query-status"}' 2>/dev/null)"
+    guest_ssh 'echo "guest : reachable ($(uname -sr))"' 2>/dev/null || echo "guest : not reachable (yet)"
+    ;;
+shot)
+    out="$DIR/${1:-shot}.png"
+    r=$(qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s","format":"png"}}' "$out")")
+    if echo "$r" | grep -q '"error"'; then
+        ppm="$DIR/${1:-shot}.ppm"
+        qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s"}}' "$ppm")" >/dev/null
+        if command -v magick >/dev/null; then magick "$ppm" "$out"
+        elif command -v convert >/dev/null; then convert "$ppm" "$out"
+        else out="$ppm"; fi
+    fi
+    echo "$out"
+    ;;
+move|tap)
+    x="$1"; y="$2"; btn="${3:-left}"
+    read -r W H < <(fb_size)
+    python3 - "$QMP_SOCK" "$x" "$y" "$W" "$H" "$cmd" "$btn" <<'PY'
+import json, socket, sys
+sp, x, y, W, H, cmd, btn = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]), sys.argv[6], sys.argv[7]
+ax = max(0, min(32767, round(x / max(1, W-1) * 32767)))
+ay = max(0, min(32767, round(y / max(1, H-1) * 32767)))
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(20); s.connect(sp)
+f = s.makefile("rwb", buffering=0); f.readline()
+f.write(b'{"execute":"qmp_capabilities"}\n'); f.readline()
+def ev(events):
+    f.write((json.dumps({"execute":"input-send-event","arguments":{"events":events}})+"\n").encode()); f.readline()
+ev([{"type":"abs","data":{"axis":"x","value":ax}},{"type":"abs","data":{"axis":"y","value":ay}}])
+if cmd == "tap":
+    ev([{"type":"btn","data":{"down":True,"button":btn}}])
+    ev([{"type":"btn","data":{"down":False,"button":btn}}])
+print(f"{cmd} {x},{y} -> abs {ax},{ay} on {W}x{H}" + (f" ({btn})" if cmd=='tap' else ""))
+PY
+    ;;
+click)
+    btn="${1:-left}"
+    qmp "$(printf '{"execute":"input-send-event","arguments":{"events":[{"type":"btn","data":{"down":true,"button":"%s"}},{"type":"btn","data":{"down":false,"button":"%s"}}]}}' "$btn" "$btn")" >/dev/null
+    echo "click $btn"
+    ;;
+keys)
+    [ $# -gt 0 ] || { echo "usage: vmkit keys K [K...]" >&2; exit 2; }
+    keys=$(printf '{"type":"qcode","data":"%s"},' "$@" | sed 's/,$//')
+    qmp "$(printf '{"execute":"send-key","arguments":{"keys":[%s]}}' "$keys")" >/dev/null
+    echo "keys: $*"
+    ;;
+type)
+    [ $# -gt 0 ] || { echo "usage: vmkit type TEXT" >&2; exit 2; }
+    python3 - "$QMP_SOCK" "$*" <<'PY'
+import json, socket, sys
+sp, text = sys.argv[1], sys.argv[2]
+base = {c: c for c in "abcdefghijklmnopqrstuvwxyz0123456789"}
+base.update({" ":"spc", ".":"dot", ",":"comma", "-":"minus", "/":"slash",
+             "=":"equal", ";":"semicolon", "'":"apostrophe", "\n":"ret", "\t":"tab"})
+shifted = {"!":"1","@":"2","#":"3","$":"4","%":"5","^":"6","&":"7","*":"8","(":"9",")":"0",
+           "_":"minus","+":"equal",":":"semicolon","\"":"apostrophe","?":"slash","<":"comma",">":"dot"}
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(30); s.connect(sp)
+f = s.makefile("rwb", buffering=0); f.readline()
+f.write(b'{"execute":"qmp_capabilities"}\n'); f.readline()
+def send(keys):
+    f.write((json.dumps({"execute":"send-key","arguments":{"keys":keys}})+"\n").encode()); f.readline()
+for ch in text:
+    if ch in shifted: send([{"type":"qcode","data":"shift"},{"type":"qcode","data":shifted[ch]}])
+    elif ch.isupper() and ch.lower() in base: send([{"type":"qcode","data":"shift"},{"type":"qcode","data":base[ch.lower()]}])
+    elif ch in base: send([{"type":"qcode","data":base[ch]}])
+    else: sys.stderr.write(f"vmkit type: no mapping for {ch!r}, skipped\n")
+print("typed", len(text), "chars")
+PY
+    ;;
+view)
+    # Shared live view for the human, alongside the agent's QMP control of the
+    # same VM. Requires the VM to have been started with --view vnc[:N].
+    [ -f "$VNCFILE" ] || { echo "no VNC view active — start with: vmkit up --view vnc" >&2; exit 1; }
+    port=$(cat "$VNCFILE"); addr="127.0.0.1:$port"
+    echo "VNC: $addr  (display :$((port-5900)))"
+    if [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+        echo "no local display in this shell — connect a viewer from your desktop:"
+        echo "  remote-viewer vnc://$addr   # or vinagre/gvncviewer/wlvncc/vncviewer"
+        exit 0
+    fi
+    for c in remote-viewer vinagre gvncviewer wlvncc vncviewer; do
+        if command -v "$c" >/dev/null; then
+            case "$c" in
+                remote-viewer) exec "$c" "vnc://$addr";;
+                gvncviewer)    exec "$c" "$addr";;
+                wlvncc)        exec "$c" 127.0.0.1 "$port";;
+                *)             exec "$c" "$addr";;
+            esac
+        fi
+    done
+    echo "no VNC client found (tried remote-viewer/vinagre/gvncviewer/wlvncc/vncviewer)" >&2; exit 1
+    ;;
+serial) tail -n "${1:-60}" "$SERIAL_LOG" ;;
+ssh)    guest_ssh "$@" ;;
+qmp)    qmp "$1" ;;
+snapshot) qmp "$(printf '{"execute":"savevm","arguments":{"name":"%s"}}' "${1:?name}")" ;;
+restore)  qmp "$(printf '{"execute":"loadvm","arguments":{"name":"%s"}}' "${1:?name}")" ;;
+down)
+    [ -S "$QMP_SOCK" ] && qmp '{"execute":"system_powerdown"}' >/dev/null 2>&1 || true
+    for _ in $(seq 1 20); do ss -ltn 2>/dev/null | grep -q ":$SSH_PORT " || break; guest_ssh true 2>/dev/null || true; done
+    if ss -ltn 2>/dev/null | grep -q ":$SSH_PORT "; then
+        P=$(cat "$PIDFILE" 2>/dev/null); [ -n "$P" ] && kill "$P" 2>/dev/null || true; fi
+    rm -f "$QMP_SOCK"; echo "down"
+    ;;
+*) sed -n '2,64p' "$0"; exit 2 ;;
+esac
