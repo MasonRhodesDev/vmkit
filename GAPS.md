@@ -73,13 +73,7 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
   signals — `find` (tesseract OCR → text+coords), `wait exec` (guest pgrep/
   journal), `wait screen` (pixel-diff) — to confirm state. Reserve visual
   judgment for a small/fast model (a Haiku subagent), not the main loop.
-  A `tap-text "<label>"` verb (OCR → click, no model) would make the common
-  case fully model-free.
-
-### Orchestration & observability
-- Single VM, x86_64/KVM only; no aarch64/TCG, no multi-VM networks.
-- No replayable action transcript (JSONL of shots/keys/clicks).
-- Device/disk/net hotplug are raw QMP; want thin verbs.
+  `tap-text` (shipped) makes the common target-a-label case fully model-free.
 
 ## Host-environment footguns (codified)
 - **Never `pkill -f <pattern>`** matching your own command line — it kills the
