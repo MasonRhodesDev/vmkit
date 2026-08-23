@@ -40,8 +40,10 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
 ## Gaps still open
 
 ### Vision
-- **OCR needs a host dependency.** `find` requires `tesseract` (+ language
-  data) on the host; absent here. Optional install, or bundle a portable OCR.
+- **OCR is a host dependency** (`tesseract` + a language pack) — documented in
+  the README dependency table; installed and validated here. `find` degrades
+  gracefully (exit 3 + message) when it's absent. `find` does case-insensitive
+  substring matching, so `find How` also matches "sHOW" — use specific queries.
 - **Still frames only.** No video/stream; motion between shots is invisible.
   Want a `watch` that surfaces meaningful change (fuzzy-diff regions).
 - **`find` returns raw OCR tokens** — no layout grouping (button vs label),

@@ -22,13 +22,26 @@ human normally gets for free:
 Agent and human drive the **same running VM at once**: the agent over QMP, the
 human over VNC. That is the collaboration model (`--view vnc`).
 
-## Requirements
+## Host dependencies
 
-Host: `qemu-system-x86_64`, `python3` (stdlib only). Optional: `magick`/`convert`
-(only as a screenshot fallback on qemu too old for PNG `screendump`); a VNC
-client for the human view (`remote-viewer`, `vinagre`, `gvncviewer`, `wlvncc`,
-or `vncviewer`). The guest needs nothing installed for vision/input/serial;
-SSH is optional and only used by the `ssh` command.
+All dependencies are on the **host**; the guest needs nothing installed for
+vision/input/serial (that's the point — it's guest-OS-agnostic).
+
+| Dependency | Required for | If missing |
+|---|---|---|
+| `qemu-system-x86_64` | everything (`up`) | vmkit can't run |
+| `python3` (stdlib only) | QMP, mouse mapping, PNG sizing | vmkit can't run |
+| `openssh` (`ssh`/`scp`) | `ssh`, `push`, `pull`, `wait ssh`/`exec` | those commands only |
+| ImageMagick (`magick`/`convert`) | `shot --grid`, `wait screen` (fuzzy diff), old-qemu PNG fallback | grid/stable degrade; plain `shot` still works via QMP PNG |
+| `tesseract` + a language pack (e.g. `tesseract-data-eng`) | `find` (OCR) | `find` prints a clear "not installed" message (exit 3) |
+| a VNC client (`remote-viewer`/`vinagre`/`gvncviewer`/`wlvncc`/`vncviewer`) | `view` (human live view) | `view` prints the address to connect manually |
+
+Arch: `pacman -S qemu-full python openssh imagemagick tesseract tesseract-data-eng virt-viewer`.
+Debian/Ubuntu: `apt install qemu-system-x86 python3 openssh-client imagemagick tesseract-ocr virt-viewer`.
+Fedora: `dnf install qemu-system-x86 python3 openssh-clients ImageMagick tesseract virt-viewer`.
+
+Core (`up`/`shot`/`keys`/`type`/`move`/`click`/`tap`/`serial`/`qmp`) needs only
+qemu + python3; the rest degrade gracefully as noted above.
 
 ## Quickstart
 
