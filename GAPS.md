@@ -92,3 +92,8 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
   so a reader (sed/tee) blocks until the VM exits. Redirect to a file.
 - **`pgrep -x` misses process names >15 chars** (e.g.
   `logind-idle-control-tray`) — use `pgrep -f` for long names.
+
+## 2026-08-23 (vigil #52 validation)
+- `snapshot`/`restore` are broken against modern QEMU: `savevm` is an HMP command, not QMP -- `{"error": {"class": "CommandNotFound", "desc": "The command savevm has not been found"}}`. Needs `human-monitor-command` wrapping (`{"execute":"human-monitor-command","arguments":{"command-line":"savevm NAME"}}`).
+- `screendump` can stall 0.5-2 s while the guest compositor is under heavy software-GL load; timestamp each shot on the host when timing matters.
+- `xexec loginctl lock-session` locks the SSH session, not the desktop -- pass the graphical session id explicitly.
