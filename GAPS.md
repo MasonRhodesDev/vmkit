@@ -39,35 +39,36 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
 
 ## Gaps still open
 
-### Vision
-- **OCR is a host dependency** (`tesseract` + a language pack) — documented in
-  the README dependency table; installed and validated here. `find` degrades
-  gracefully (exit 3 + message) when it's absent. `find` does case-insensitive
-  substring matching, so `find How` also matches "sHOW" — use specific queries.
-- **Still frames only.** No video/stream; motion between shots is invisible.
-  Want a `watch` that surfaces meaningful change (fuzzy-diff regions).
-- **`find` returns raw OCR tokens** — no layout grouping (button vs label),
-  no template/icon match for non-text targets.
+### Bridged in the v0.2 "blast" (were open, now shipped)
+- `tap-text "LABEL"` — OCR consecutive-word-run targeting (tight bbox, so
+  adjacent buttons like Restart / Shut Down don't merge). Validated: "Shut
+  Down" -> (212,1310), not the row center.
+- `drag`, `scroll` — pointer press-move-release and wheel.
+- `xexec CMD` — run in the guest's graphical (systemd --user) session with
+  WAYLAND_DISPLAY/HYPRLAND_INSTANCE/etc. resolved (validated: hyprctl version).
+- `watch` — emit on screen change (fuzzy pixel-diff), motion-aware waiting.
+- `find --line` — group multi-word labels.
+- action transcript (`actions.jsonl`), `overlay new/reset`, `image pull`,
+  `--arch`/`--accel`.
 
-### Input
-- **Partial keymap.** `type` covers US-ASCII; non-US layouts, unicode, compose
-  unmapped. Want layout-aware typing or clipboard paste.
-- **No drag / scroll / hold**; single display only (multi-head + mid-session
-  resolution changes not handled by the pixel->abs mapping).
+### Still open
+- **Video/stream** — only `watch` (change events) and still `shot`; no live
+  encode. Fine for agent use; a human uses `view` (VNC).
+- **Non-text / icon targets** — `find`/`tap-text` are text-only. Want template
+  match (`magick -subimage-search`) to click an icon with no label.
+- **Keymap** — `type` is US-ASCII; non-US layouts, unicode, compose unmapped.
+  Want layout-aware typing or clipboard paste.
+- **Multi-head / resolution changes** — pixel->abs mapping assumes one display
+  at the current framebuffer size.
+- **Non-x86 is flag-only** — `--arch/--accel` exist and select the qemu binary/
+  machine, but aarch64/TCG boot isn't validated here (no non-x86 guest).
+- **Provisioning** — `image pull` fetches a base, but cloud-init/autoinstall
+  seed generation is still caller-supplied (`--cidata`).
+- **Multi-VM networks** — single VM only; no client+server / cluster topology.
+- **Session-state naming** (greeter vs lock vs session) stays guest-specific;
+  `xexec` + `find`/`wait exec` cover the practical need.
 
-### Session awareness
-- **No "what state is the guest in" primitive** (greeter vs lock vs session).
-  It's guest/compositor-specific, so likely a recipe layer, not core — but the
-  idle-lock surprise argues for at least a documented pattern.
-- **Launching into a graphical session is manual** (`XDG_RUNTIME_DIR=… hyprctl
-  dispatch exec …`). A generic `ssh --session` that resolves the seat's
-  runtime dir + wayland socket would cover most Linux guests.
-
-### Provisioning & images (out of core, needed by the toolchain)
-- cloud-init/cidata is taken prebuilt (`--cidata`), not generated; no image
-  pull / overlay-new / reset. Borrowed from per-product harnesses today.
-
-### Model economy (how an agent should use these)
+## Model economy (how an agent should use these)
 - **Don't read screenshots with an expensive model.** Prefer model-free
   signals — `find` (tesseract OCR → text+coords), `wait exec` (guest pgrep/
   journal), `wait screen` (pixel-diff) — to confirm state. Reserve visual

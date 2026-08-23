@@ -5,9 +5,10 @@
 # guest installs, so the same commands drive Linux, BSD, Windows, an installer
 # ISO, or a kernel that never reaches userspace.
 #
-# Host needs: qemu-system-x86_64, python3 (stdlib only). Optional: an image
-# tool (magick/convert) only as a fallback when the host qemu is too old for
-# PNG screendumps.
+# Host needs: qemu-system-<arch>, python3 (stdlib only), openssh. Optional:
+# ImageMagick (shot --grid, wait screen/watch fuzzy-diff, old-qemu PNG
+# fallback), tesseract+langpack (find/tap-text OCR), a VNC client (view),
+# curl (image pull). See README for the full dependency table.
 #
 # Config resolves from flags, then env, then defaults:
 #   --overlay PATH     VMKIT_OVERLAY     disk image to boot (required for `up`)
@@ -19,6 +20,8 @@
 #   --ssh-key PATH     VMKIT_SSH_KEY     ssh identity (~/.ssh/id_ed25519)
 #   --mem MB           VMKIT_MEM         guest RAM MiB (4096)
 #   --smp N            VMKIT_SMP         vcpus (4)
+#   --arch A           VMKIT_ARCH        qemu-system-<A> (x86_64 default)
+#   --accel A          VMKIT_ACCEL       kvm (default) | tcg
 #   --vnc N            VMKIT_VNC         also expose VNC on 127.0.0.1:590N
 #
 # Collaboration: start with `--view vnc` so the agent (QMP: shot/keys/mouse) and
@@ -32,11 +35,14 @@
 #   status                   sockets, ssh reachability, run-state
 #   shot [name] [--grid]     screendump -> <dir>/<name>.png; --grid overlays a
 #                            coordinate ruler so tap targets can be read off
-#   find [TEXT]              OCR the screen -> "x,y<TAB>text" per match, so you
-#                            can `tap` a label instead of guessing (needs tesseract)
+#   find [TEXT] [--line]     OCR the screen -> "x,y<TAB>text" per match (word or
+#                            grouped line); pick a `tap` target (needs tesseract)
+#   tap-text "LABEL" [n] [btn]  OCR-locate a label (consecutive word run) and click it
 #   move X Y                 move pointer to pixel (X,Y)
 #   click [left|right|middle]  click at the current pointer position
 #   tap X Y [button]         move to (X,Y) then click
+#   drag X1 Y1 X2 Y2 [btn]   press-move-release
+#   scroll up|down [n]       wheel scroll n notches
 #   keys K [K...]            send QMP qcodes (e.g. ret esc tab shift-1 ctrl-alt-f2)
 #   type TEXT                type an ASCII string
 #   wait ssh|exec|serial|screen [args] [timeout]
@@ -44,6 +50,11 @@
 #                            the serial log matches a regex | the frame is stable
 #   push LOCAL GUEST-DEST    scp + sudo-install a file into the guest
 #   pull GUEST-PATH LOCAL    copy a file out of the guest
+#   xexec CMD...             run CMD in the guest's graphical (systemd --user) session
+#   watch [timeout]          emit a line whenever the screen changes (motion)
+#   overlay new BASE [OVL]   create a qcow2 overlay backed by BASE
+#   overlay reset [OVL]      recreate an overlay from its backing image
+#   image pull URL [DEST]    fetch a base image (needs curl)
 #   serial [N]               print last N lines of the serial/console log (default 60)
 #   ssh [CMD...]             ssh into the guest (interactive if no CMD)
 #   qmp JSON                 raw QMP command object; prints the JSON reply
@@ -60,6 +71,7 @@ OVERLAY="${VMKIT_OVERLAY:-}"; CIDATA="${VMKIT_CIDATA:-}"; DIR="${VMKIT_DIR:-}"
 SSH_PORT="${VMKIT_SSH_PORT:-2222}"; SSH_USER="${VMKIT_SSH_USER:-$USER}"
 SSH_KEY="${VMKIT_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 MEM="${VMKIT_MEM:-4096}"; SMP="${VMKIT_SMP:-4}"
+ARCH="${VMKIT_ARCH:-x86_64}"; ACCEL="${VMKIT_ACCEL:-kvm}"
 # VIEW controls the human-facing display: none (agent-only, headless),
 # vnc[:N] (shared live view — agent drives QMP, human attaches a VNC client to
 # the SAME running VM), or gtk (a native window; only works when vmkit is run
@@ -79,6 +91,8 @@ while [ $# -gt 0 ]; do
         --smp) SMP="$2"; shift 2;;
         --view) VIEW="$2"; shift 2;;
         --vnc) VIEW="vnc:$2"; shift 2;;
+        --arch) ARCH="$2"; shift 2;;
+        --accel) ACCEL="$2"; shift 2;;
         --) shift; args+=("$@"); break;;
         *) args+=("$1"); shift;;
     esac
@@ -174,6 +188,70 @@ elif d[:2] == b"P6":                                   # PPM fallback
 PY
 }
 
+# Append one action to the JSONL transcript ($DIR/actions.jsonl) so a session
+# can be reviewed or replayed. Timestamp is host wall-clock.
+log_action() {
+    printf '{"t":"%s","cmd":"%s","args":"%s"}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '')" "$1" "$(printf '%s ' "${@:2}" | sed 's/"/\\"/g; s/ *$//')" \
+        >> "$DIR/actions.jsonl" 2>/dev/null || true
+}
+
+# All pointer ops through one mapper (pixel -> abs axis using live fb size).
+#   pointer move X Y | tap X Y [btn] | drag X1 Y1 X2 Y2 [btn] | scroll up|down [n]
+pointer() {
+    local W H; read -r W H < <(fb_size)
+    python3 - "$QMP_SOCK" "$W" "$H" "$@" <<'PY'
+import json, socket, sys
+sp, W, H = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+op = sys.argv[4]; a = sys.argv[5:]
+def ax(x): return max(0, min(32767, round(int(x) / max(1, W-1) * 32767)))
+def ay(y): return max(0, min(32767, round(int(y) / max(1, H-1) * 32767)))
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(20); s.connect(sp)
+f = s.makefile("rwb", buffering=0); f.readline()
+f.write(b'{"execute":"qmp_capabilities"}\n'); f.readline()
+def ev(events):
+    f.write((json.dumps({"execute":"input-send-event","arguments":{"events":events}})+"\n").encode()); f.readline()
+def moveto(x,y): ev([{"type":"abs","data":{"axis":"x","value":ax(x)}},{"type":"abs","data":{"axis":"y","value":ay(y)}}])
+if op=="move":
+    moveto(a[0],a[1]); print(f"move {a[0]},{a[1]}")
+elif op=="tap":
+    btn=a[2] if len(a)>2 else "left"; moveto(a[0],a[1])
+    ev([{"type":"btn","data":{"down":True,"button":btn}}]); ev([{"type":"btn","data":{"down":False,"button":btn}}])
+    print(f"tap {a[0]},{a[1]} ({btn})")
+elif op=="drag":
+    btn=a[4] if len(a)>4 else "left"; moveto(a[0],a[1])
+    ev([{"type":"btn","data":{"down":True,"button":btn}}])
+    # a few interpolated steps so drag-aware UIs register motion
+    for i in range(1,6):
+        x=int(a[0])+(int(a[2])-int(a[0]))*i//5; y=int(a[1])+(int(a[3])-int(a[1]))*i//5; moveto(x,y)
+    ev([{"type":"btn","data":{"down":False,"button":btn}}])
+    print(f"drag {a[0]},{a[1]} -> {a[2]},{a[3]} ({btn})")
+elif op=="scroll":
+    direction=a[0]; n=int(a[1]) if len(a)>1 else 3; btn="wheel-up" if direction in ("up","u") else "wheel-down"
+    for _ in range(n): ev([{"type":"btn","data":{"down":True,"button":btn}}]); ev([{"type":"btn","data":{"down":False,"button":btn}}])
+    print(f"scroll {direction} x{n}")
+else:
+    print("bad pointer op: "+op, file=sys.stderr); sys.exit(2)
+PY
+}
+
+# OCR the current screen -> lines of "cx cy text". mode: word (default) or line.
+ocr_screen() {
+    local mode="${1:-word}" png="$DIR/.ocr.png"
+    qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s","format":"png"}}' "$png")" >/dev/null 2>&1 \
+        || qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s"}}' "$png")" >/dev/null
+    tesseract "$png" - tsv 2>/dev/null | awk -v mode="$mode" -F'\t' '
+        NR>1 && $12!="" && $12!=" " {
+            if (mode=="line") {
+                key=$2"-"$3"-"$4"-"$5   # page-block-par-line
+                if (!(key in txt)) { x0[key]=$7; y0[key]=$8 }
+                txt[key]=txt[key] (txt[key]==""?"":" ") $12
+                x1[key]=$7+$9; y1[key]=($8+$10>y1[key]?$8+$10:y1[key])
+            } else { printf "%d %d\t%s\n", $7+$9/2, $8+$10/2, $12 }
+        }
+        END { if (mode=="line") for (k in txt) printf "%d %d\t%s\n", (x0[k]+x1[k])/2, (y0[k]+y1[k])/2, txt[k] }'
+}
+
 case "$cmd" in
 up)
     [ -n "$OVERLAY" ] && [ -f "$OVERLAY" ] || { echo "vmkit: --overlay PATH required (got '$OVERLAY')" >&2; exit 2; }
@@ -188,10 +266,13 @@ up)
         *) echo "vmkit: unknown --view '$VIEW' (none|vnc[:N]|gtk)" >&2; exit 2;;
     esac
     cidata=(); [ -n "$CIDATA" ] && cidata=(-drive if=virtio,file="$CIDATA",format=raw,media=cdrom,read-only=on)
-    echo "== vmkit up: $(basename "$OVERLAY")  view=$VIEW  serial=$SERIAL_LOG  qmp=$QMP_SOCK  ssh=$SSH_PORT$([ -f "$VNCFILE" ] && echo "  vnc=127.0.0.1:$(cat "$VNCFILE")")"
-    nice -n 19 qemu-system-x86_64 \
+    # Machine/cpu per arch+accel: KVM uses host passthrough; TCG needs a model.
+    case "$ARCH" in x86_64|i386) machine=q35;; aarch64|arm) machine=virt;; *) machine=virt;; esac
+    [ "$ACCEL" = kvm ] && cpu=host || cpu=max
+    echo "== vmkit up: $(basename "$OVERLAY")  arch=$ARCH accel=$ACCEL  view=$VIEW  serial=$SERIAL_LOG  qmp=$QMP_SOCK  ssh=$SSH_PORT$([ -f "$VNCFILE" ] && echo "  vnc=127.0.0.1:$(cat "$VNCFILE")")"
+    nice -n 19 "qemu-system-$ARCH" \
         -name "vmkit-$(basename "$OVERLAY" .qcow2)" \
-        -machine q35,accel=kvm -cpu host -m "$MEM" -smp "$SMP" \
+        -machine "$machine,accel=$ACCEL" -cpu "$cpu" -m "$MEM" -smp "$SMP" \
         -drive if=virtio,file="$OVERLAY",discard=unmap,detect-zeroes=unmap \
         "${cidata[@]}" \
         -netdev user,id=net0,hostfwd=tcp:127.0.0.1:"$SSH_PORT"-:22 \
@@ -210,6 +291,7 @@ status)
     guest_ssh 'echo "guest : reachable ($(uname -sr))"' 2>/dev/null || echo "guest : not reachable (yet)"
     ;;
 shot)
+    log_action shot "$@"
     grid=""; name="shot"
     for a in "$@"; do case "$a" in --grid) grid=1;; *) name="$a";; esac; done
     out="$DIR/${name}.png"
@@ -225,39 +307,65 @@ shot)
     echo "$out"
     ;;
 find)
-    # OCR the screen and print "x,y<TAB>text" per match (center of each word/line).
-    # Needs tesseract on the host. `find "Shut Down"` filters to matches; bare
-    # `find` prints everything found so you can pick a tap target.
+    # OCR the screen -> "cx,cy<TAB>text". `find "Shut Down"` filters (case-
+    # insensitive substring); bare `find` prints everything. --line groups a
+    # whole OCR line (so multi-word labels match); default is per-word.
     command -v tesseract >/dev/null || { echo "vmkit find: tesseract not installed on host" >&2; exit 3; }
-    q="${1:-}"; png="$DIR/.ocr.png"
+    mode=word; q=""
+    for a in "$@"; do case "$a" in --line) mode=line;; *) q="$a";; esac; done
+    ocr_screen "$mode" | awk -v q="$q" -F'\t' 'q=="" || index(tolower($2),tolower(q))>0 {gsub(/ /,",",$1); print $1"\t"$2}'
+    ;;
+tap-text)
+    # OCR-locate a label and click it. `tap-text "Shut Down" [nth] [button]`.
+    # Uses --line grouping so multi-word labels match. Exit 1 if not found.
+    command -v tesseract >/dev/null || { echo "vmkit tap-text: tesseract not installed on host" >&2; exit 3; }
+    q="${1:?vmkit tap-text \"<label>\" [nth] [button]}"; nth="${2:-1}"; btn="${3:-left}"
+    png="$DIR/.ocr.png"
     qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s","format":"png"}}' "$png")" >/dev/null 2>&1 \
         || qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s"}}' "$png")" >/dev/null
-    tesseract "$png" - tsv 2>/dev/null | awk -v q="$q" -F'\t' '
-        NR>1 && $12!="" && $12!=" " {
-            cx=$7+$9/2; cy=$8+$10/2;
-            if (q=="" || index(tolower($12), tolower(q))>0) printf "%d,%d\t%s\n", cx, cy, $12
-        }'
-    ;;
-move|tap)
-    x="$1"; y="$2"; btn="${3:-left}"
-    read -r W H < <(fb_size)
-    python3 - "$QMP_SOCK" "$x" "$y" "$W" "$H" "$cmd" "$btn" <<'PY'
-import json, socket, sys
-sp, x, y, W, H, cmd, btn = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]), sys.argv[6], sys.argv[7]
-ax = max(0, min(32767, round(x / max(1, W-1) * 32767)))
-ay = max(0, min(32767, round(y / max(1, H-1) * 32767)))
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(20); s.connect(sp)
-f = s.makefile("rwb", buffering=0); f.readline()
-f.write(b'{"execute":"qmp_capabilities"}\n'); f.readline()
-def ev(events):
-    f.write((json.dumps({"execute":"input-send-event","arguments":{"events":events}})+"\n").encode()); f.readline()
-ev([{"type":"abs","data":{"axis":"x","value":ax}},{"type":"abs","data":{"axis":"y","value":ay}}])
-if cmd == "tap":
-    ev([{"type":"btn","data":{"down":True,"button":btn}}])
-    ev([{"type":"btn","data":{"down":False,"button":btn}}])
-print(f"{cmd} {x},{y} -> abs {ax},{ay} on {W}x{H}" + (f" ({btn})" if cmd=='tap' else ""))
+    # Match the query as a consecutive run of words within one OCR line and
+    # target the bbox of just those words (so adjacent buttons don't merge).
+    # tesseract TSV goes to a file: a heredoc script can't also read stdin.
+    tesseract "$png" - tsv >"$DIR/.ocr.tsv" 2>/dev/null
+    target=$(python3 - "$q" "$nth" "$DIR/.ocr.tsv" <<'PY'
+import sys
+q=sys.argv[1].lower().split(); nth=int(sys.argv[2])
+lines={}
+for ln in open(sys.argv[3], encoding="utf-8", errors="replace"):
+    p=ln.rstrip("\n").split("\t")
+    if len(p)<12 or p[0]=="level" or p[11].strip()=="": continue
+    key=(p[1],p[2],p[3],p[4])  # page/block/par/line
+    lines.setdefault(key,[]).append((p[11], int(p[6]),int(p[7]),int(p[8]),int(p[9])))  # text,l,t,w,h
+hits=[]
+for words in lines.values():
+    toks=[w[0].lower() for w in words]
+    for i in range(len(toks)-len(q)+1):
+        if toks[i:i+len(q)]==q:
+            run=words[i:i+len(q)]
+            l=min(w[1] for w in run); t=min(w[2] for w in run)
+            r=max(w[1]+w[3] for w in run); b=max(w[2]+w[4] for w in run)
+            hits.append(((l+r)//2,(t+b)//2))
+# fall back to substring-in-line if no exact word run
+if not hits:
+    ql=" ".join(q)
+    for words in lines.values():
+        joined=" ".join(w[0] for w in words).lower()
+        if ql in joined:
+            l=min(w[1] for w in words); t=min(w[2] for w in words)
+            r=max(w[1]+w[3] for w in words); b=max(w[2]+w[4] for w in words)
+            hits.append(((l+r)//2,(t+b)//2))
+if len(hits)>=nth: print(f"{hits[nth-1][0]} {hits[nth-1][1]}")
 PY
+)
+    [ -n "$target" ] || { echo "tap-text: no on-screen match for \"$q\"" >&2; exit 1; }
+    set -- $target
+    log_action tap-text "$q" "$1" "$2"
+    pointer tap "$1" "$2" "$btn"
     ;;
+move) log_action move "$@"; pointer move "$1" "$2" ;;
+tap)  log_action tap "$@";  pointer tap "$1" "$2" "${3:-left}" ;;
+drag) log_action drag "$@"; pointer drag "$1" "$2" "$3" "$4" "${5:-left}" ;;
+scroll) log_action scroll "$@"; pointer scroll "${1:-down}" "${2:-3}" ;;
 click)
     btn="${1:-left}"
     qmp "$(printf '{"execute":"input-send-event","arguments":{"events":[{"type":"btn","data":{"down":true,"button":"%s"}},{"type":"btn","data":{"down":false,"button":"%s"}}]}}' "$btn" "$btn")" >/dev/null
@@ -265,12 +373,14 @@ click)
     ;;
 keys)
     [ $# -gt 0 ] || { echo "usage: vmkit keys K [K...]" >&2; exit 2; }
+    log_action keys "$@"
     keys=$(printf '{"type":"qcode","data":"%s"},' "$@" | sed 's/,$//')
     qmp "$(printf '{"execute":"send-key","arguments":{"keys":[%s]}}' "$keys")" >/dev/null
     echo "keys: $*"
     ;;
 type)
     [ $# -gt 0 ] || { echo "usage: vmkit type TEXT" >&2; exit 2; }
+    log_action type "(${#*} args)"
     python3 - "$QMP_SOCK" "$*" <<'PY'
 import json, socket, sys
 sp, text = sys.argv[1], sys.argv[2]
@@ -358,6 +468,48 @@ pull)  # pull <guest-path> <local>
     gsrc="${1:?vmkit pull <guest-path> <local>}"; ldst="${2:?local dest required}"
     guest_scp "$SSH_USER@127.0.0.1:$gsrc" "$ldst" >/dev/null && echo "pulled $gsrc -> $ldst"
     ;;
+xexec)  # run a command inside the guest's graphical (systemd --user) session,
+        # resolving XDG_RUNTIME_DIR + WAYLAND_DISPLAY/DISPLAY/etc. so GUI apps
+        # launch on the desktop without hand-set env. Generic for Linux guests.
+    [ $# -gt 0 ] || { echo "usage: vmkit xexec <cmd...>" >&2; exit 2; }
+    # ssh concatenates args into one remote command string, so build it: a
+    # single-quoted env-resolver prefix + the caller's command joined with $*.
+    guest_ssh 'export XDG_RUNTIME_DIR=/run/user/$(id -u); eval "$(systemctl --user show-environment 2>/dev/null | grep -E "^(WAYLAND_DISPLAY|DISPLAY|HYPRLAND_INSTANCE_SIGNATURE|DBUS_SESSION_BUS_ADDRESS|XDG_CURRENT_DESKTOP)=" | sed "s/^/export /")"; '"$*"
+    ;;
+watch)  # emit a line whenever the screen changes beyond VMKIT_STABLE_PX, until
+        # timeout. Pairs with the harness Monitor for motion-aware waiting.
+    command -v magick >/dev/null || { echo "vmkit watch needs magick" >&2; exit 3; }
+    to="${1:-120}"; thresh="${VMKIT_STABLE_PX:-5000}"; waited=0; prev=""
+    while [ "$waited" -lt "$to" ]; do
+        cur="$DIR/.w-$((waited % 2)).png"
+        qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s","format":"png"}}' "$cur")" >/dev/null 2>&1
+        if [ -n "$prev" ]; then
+            d=$(magick compare -metric AE -fuzz 4% "$prev" "$cur" null: 2>&1 | tr -cd '0-9'); d="${d:-0}"
+            [ "$d" -ge "$thresh" ] && echo "$(date -u +%H:%M:%SZ 2>/dev/null) changed ${d}px"
+        fi
+        prev="$cur"; sleep 1 2>/dev/null || :; waited=$((waited+1))
+    done
+    ;;
+overlay)  # overlay new <base> [overlay] | overlay reset [overlay]
+    sub="${1:-}"; shift || true
+    [ -n "$sub" ] || { echo "usage: vmkit overlay {new <base> [overlay]|reset [overlay]}" >&2; exit 2; }
+    case "$sub" in
+        new)  base="${1:?overlay new <base> [overlay]}"; ovl="${2:-$OVERLAY}"
+              [ -n "$ovl" ] || { echo "overlay path required (--overlay or 2nd arg)" >&2; exit 2; }
+              qemu-img create -f qcow2 -F qcow2 -b "$base" "$ovl" >/dev/null && echo "created $ovl (backed by $base)";;
+        reset) ovl="${1:-$OVERLAY}"; [ -f "$ovl" ] || { echo "no overlay: $ovl" >&2; exit 2; }
+              base=$(qemu-img info "$ovl" | sed -n 's/^backing file: //p' | head -1)
+              [ -n "$base" ] || { echo "overlay has no backing file; refusing to reset $ovl" >&2; exit 2; }
+              rm -f "$ovl"; qemu-img create -f qcow2 -F qcow2 -b "$base" "$ovl" >/dev/null && echo "reset $ovl (from $base)";;
+        *) echo "usage: vmkit overlay {new <base> [overlay]|reset [overlay]}" >&2; exit 2;;
+    esac
+    ;;
+image)  # image pull <url> [dest] — fetch a base cloud image
+    [ "${1:-}" = pull ] || { echo "usage: vmkit image pull <url> [dest]" >&2; exit 2; }
+    url="${2:?image pull <url> [dest]}"; dest="${3:-$(basename "$url")}"
+    command -v curl >/dev/null || { echo "vmkit image pull needs curl" >&2; exit 3; }
+    curl -fL "$url" -o "$dest" && echo "pulled $dest"
+    ;;
 serial) tail -n "${1:-60}" "$SERIAL_LOG" ;;
 ssh)    guest_ssh "$@" ;;
 qmp)    qmp "$1" ;;
@@ -370,5 +522,5 @@ down)
         P=$(cat "$PIDFILE" 2>/dev/null); [ -n "$P" ] && kill "$P" 2>/dev/null || true; fi
     rm -f "$QMP_SOCK"; echo "down"
     ;;
-*) sed -n '2,74p' "$0"; exit 2 ;;
+*) sed -n '2,64p' "$0"; exit 2 ;;
 esac
