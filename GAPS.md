@@ -50,6 +50,10 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
 - `find --line` — group multi-word labels.
 - action transcript (`actions.jsonl`), `overlay new/reset`, `image pull`,
   `--arch`/`--accel`.
+- **Non-x86 boot (validated)** — `up` is arch-aware: aarch64 gets `virt` +
+  UEFI pflash firmware + virtio-gpu/xhci. Booted Alpine aarch64 under TCG to
+  `Linux version 6.12 aarch64` via `--arch aarch64 --accel tcg` (needs
+  qemu-system-aarch64 + edk2-aarch64 on the host).
 
 ### Still open
 - **Video/stream** — only `watch` (change events) and still `shot`; no live
@@ -60,8 +64,6 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
   Want layout-aware typing or clipboard paste.
 - **Multi-head / resolution changes** — pixel->abs mapping assumes one display
   at the current framebuffer size.
-- **Non-x86 is flag-only** — `--arch/--accel` exist and select the qemu binary/
-  machine, but aarch64/TCG boot isn't validated here (no non-x86 guest).
 - **Provisioning** — `image pull` fetches a base, but cloud-init/autoinstall
   seed generation is still caller-supplied (`--cidata`).
 - **Multi-VM networks** — single VM only; no client+server / cluster topology.
@@ -83,5 +85,10 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
 - **SSH into a rebooting guest hangs without keepalives** — `guest_ssh` sets
   `ServerAliveInterval`/`CountMax` so a black-holed connection drops.
 - **Some agent shells block foreground `sleep`** — `poll` tolerates it.
+- **`ls A B C` exits non-zero if ANY path is missing** — under `set -o
+  pipefail` that aborts the script; use a loop to find the first existing file
+  (bit the aarch64 firmware detection).
+- **Don't pipe `up`'s stdout** — backgrounded qemu inherits and holds the fd,
+  so a reader (sed/tee) blocks until the VM exits. Redirect to a file.
 - **`pgrep -x` misses process names >15 chars** (e.g.
   `logind-idle-control-tray`) — use `pgrep -f` for long names.

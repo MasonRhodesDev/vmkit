@@ -34,6 +34,7 @@ vision/input/serial (that's the point — it's guest-OS-agnostic).
 | `openssh` (`ssh`/`scp`) | `ssh`, `push`, `pull`, `wait ssh`/`exec` | those commands only |
 | ImageMagick (`magick`/`convert`) | `shot --grid`, `wait screen` (fuzzy diff), old-qemu PNG fallback | grid/stable degrade; plain `shot` still works via QMP PNG |
 | `tesseract` + a language pack (e.g. `tesseract-data-eng`) | `find` (OCR) | `find` prints a clear "not installed" message (exit 3) |
+| `qemu-system-<arch>` + UEFI firmware (e.g. `edk2-aarch64`) | non-x86 guests via `--arch`/`--accel` (validated: aarch64/TCG) | `--arch` only |
 | a VNC client (`remote-viewer`/`vinagre`/`gvncviewer`/`wlvncc`/`vncviewer`) | `view` (human live view) | `view` prints the address to connect manually |
 
 Arch: `pacman -S qemu-full python openssh imagemagick tesseract tesseract-data-eng virt-viewer`.

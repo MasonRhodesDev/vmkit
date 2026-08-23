@@ -267,20 +267,39 @@ up)
     esac
     cidata=(); [ -n "$CIDATA" ] && cidata=(-drive if=virtio,file="$CIDATA",format=raw,media=cdrom,read-only=on)
     # Machine/cpu per arch+accel: KVM uses host passthrough; TCG needs a model.
-    case "$ARCH" in x86_64|i386) machine=q35;; aarch64|arm) machine=virt;; *) machine=virt;; esac
+    # Devices differ too: x86 q35 has VGA + a USB controller; aarch64 virt has
+    # neither and needs UEFI firmware (pflash) + virtio-gpu/xhci.
     [ "$ACCEL" = kvm ] && cpu=host || cpu=max
+    fw=(); gpu=(-vga virtio); usb=(-usb)
+    case "$ARCH" in
+        x86_64|i386) machine=q35 ;;
+        aarch64|arm)
+            machine=virt; gpu=(-device virtio-gpu-pci); usb=(-device qemu-xhci)
+            # UEFI: readonly code + a per-VM writable vars copy. (Loop, not
+            # `ls A B C` — ls exits non-zero on any missing path and pipefail
+            # would abort under set -e.)
+            code=""; for c in /usr/share/edk2/aarch64/QEMU_EFI.fd /usr/share/AAVMF/AAVMF_CODE.fd /usr/share/edk2/arm/QEMU_EFI.fd; do [ -f "$c" ] && { code="$c"; break; }; done
+            vars0=""; for v in /usr/share/edk2/aarch64/QEMU_VARS.fd /usr/share/AAVMF/AAVMF_VARS.fd; do [ -f "$v" ] && { vars0="$v"; break; }; done
+            if [ -n "$code" ]; then
+                [ -f "$DIR/efivars.fd" ] || { [ -n "$vars0" ] && cp "$vars0" "$DIR/efivars.fd" || truncate -s 64M "$DIR/efivars.fd"; }
+                fw=(-drive "if=pflash,format=raw,readonly=on,file=$code"
+                    -drive "if=pflash,format=raw,file=$DIR/efivars.fd")
+            else echo "vmkit: no aarch64 UEFI firmware found (install edk2-aarch64/AAVMF)" >&2; exit 3; fi ;;
+        *) machine=virt ;;
+    esac
     echo "== vmkit up: $(basename "$OVERLAY")  arch=$ARCH accel=$ACCEL  view=$VIEW  serial=$SERIAL_LOG  qmp=$QMP_SOCK  ssh=$SSH_PORT$([ -f "$VNCFILE" ] && echo "  vnc=127.0.0.1:$(cat "$VNCFILE")")"
     nice -n 19 "qemu-system-$ARCH" \
         -name "vmkit-$(basename "$OVERLAY" .qcow2)" \
         -machine "$machine,accel=$ACCEL" -cpu "$cpu" -m "$MEM" -smp "$SMP" \
+        "${fw[@]}" \
         -drive if=virtio,file="$OVERLAY",discard=unmap,detect-zeroes=unmap \
         "${cidata[@]}" \
         -netdev user,id=net0,hostfwd=tcp:127.0.0.1:"$SSH_PORT"-:22 \
         -device virtio-net-pci,netdev=net0 \
-        -vga virtio "${disp[@]}" \
+        "${gpu[@]}" "${disp[@]}" \
         -serial file:"$SERIAL_LOG" \
         -qmp unix:"$QMP_SOCK",server,nowait \
-        -device virtio-tablet-pci -usb -device usb-kbd -audio none \
+        -device virtio-tablet-pci "${usb[@]}" -device usb-kbd -audio none \
         -pidfile "$PIDFILE" &
     echo "   qemu pid $!"
     ;;
