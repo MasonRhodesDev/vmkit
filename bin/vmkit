@@ -30,12 +30,20 @@
 #   up                       boot with serial+QMP; view per --view (none|vnc[:N]|gtk)
 #   view                     open a VNC client to the shared view (human side)
 #   status                   sockets, ssh reachability, run-state
-#   shot [name]              screendump the framebuffer -> <dir>/<name>.png (prints path)
+#   shot [name] [--grid]     screendump -> <dir>/<name>.png; --grid overlays a
+#                            coordinate ruler so tap targets can be read off
+#   find [TEXT]              OCR the screen -> "x,y<TAB>text" per match, so you
+#                            can `tap` a label instead of guessing (needs tesseract)
 #   move X Y                 move pointer to pixel (X,Y)
 #   click [left|right|middle]  click at the current pointer position
 #   tap X Y [button]         move to (X,Y) then click
 #   keys K [K...]            send QMP qcodes (e.g. ret esc tab shift-1 ctrl-alt-f2)
 #   type TEXT                type an ASCII string
+#   wait ssh|exec|serial|screen [args] [timeout]
+#                            block until: ssh reachable | a guest cmd exits 0 |
+#                            the serial log matches a regex | the frame is stable
+#   push LOCAL GUEST-DEST    scp + sudo-install a file into the guest
+#   pull GUEST-PATH LOCAL    copy a file out of the guest
 #   serial [N]               print last N lines of the serial/console log (default 60)
 #   ssh [CMD...]             ssh into the guest (interactive if no CMD)
 #   qmp JSON                 raw QMP command object; prints the JSON reply
@@ -101,10 +109,54 @@ while True:
 PY
 }
 
-guest_ssh() {
-    ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN" \
-        -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
-        -p "$SSH_PORT" -i "$SSH_KEY" "$SSH_USER@127.0.0.1" "$@"
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN"
+          -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3
+          -o BatchMode=yes)
+guest_ssh() { ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" -i "$SSH_KEY" "$SSH_USER@127.0.0.1" "$@"; }
+guest_scp() { scp "${SSH_OPTS[@]}" -P "$SSH_PORT" -i "$SSH_KEY" "$@"; }
+
+# Bounded poll instead of ad-hoc `for i in seq … sleep` loops. Prints nothing;
+# exit 0 on success, 1 on timeout. Uses the shell's own clock via a counter
+# (agent shells often block foreground `sleep`, so keep intervals coarse).
+poll() {  # poll <timeout_s> <interval_s> <cmd...>
+    local timeout="$1" interval="$2"; shift 2
+    local waited=0
+    while ! "$@" >/dev/null 2>&1; do
+        [ "$waited" -ge "$timeout" ] && return 1
+        sleep "$interval" 2>/dev/null || command sleep "$interval" 2>/dev/null || :
+        waited=$((waited + interval))
+    done
+    return 0
+}
+
+# Overlay a coordinate grid + axis labels so pixel targets can be read off a
+# screenshot instead of guessed. Lines every 100px, labels every 200px.
+grid_overlay() {  # grid_overlay <in.png> <out.png>
+    command -v magick >/dev/null || { echo "$1"; return; }
+    local in="$1" out="$2"
+    read -r W H < <(python3 - "$in" <<'PY'
+import struct,sys
+d=open(sys.argv[1],'rb').read(24)
+print(*struct.unpack('>II',d[16:24])) if d[:8]==b'\x89PNG\r\n\x1a\n' else print(1280,800)
+PY
+)
+    local mvg; mvg="$(python3 - "$W" "$H" <<'PY'
+import sys
+W,H=int(sys.argv[1]),int(sys.argv[2]); out=[]
+for x in range(0,W,100):
+    out.append(f"line {x},0 {x},{H}")
+    if x%200==0: out.append(f"text {x+2},14 '{x}'")
+for y in range(0,H,100):
+    out.append(f"line 0,{y} {W},{y}")
+    if y%200==0: out.append(f"text 2,{y+14} '{y}'")
+print("\n".join(out))
+PY
+)"
+    magick "$in" -stroke 'rgba(255,64,64,0.35)' -strokewidth 1 -fill none \
+        -draw "$(printf '%s' "$mvg" | grep '^line')" \
+        -stroke none -fill 'rgba(255,80,80,0.9)' -pointsize 13 -font DejaVu-Sans-Mono \
+        -draw "$(printf '%s' "$mvg" | grep '^text')" \
+        "$out" 2>/dev/null && echo "$out" || echo "$in"
 }
 
 # framebuffer WxH from a throwaway screendump (needed to map pixels -> abs axis)
@@ -158,16 +210,33 @@ status)
     guest_ssh 'echo "guest : reachable ($(uname -sr))"' 2>/dev/null || echo "guest : not reachable (yet)"
     ;;
 shot)
-    out="$DIR/${1:-shot}.png"
+    grid=""; name="shot"
+    for a in "$@"; do case "$a" in --grid) grid=1;; *) name="$a";; esac; done
+    out="$DIR/${name}.png"
     r=$(qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s","format":"png"}}' "$out")")
     if echo "$r" | grep -q '"error"'; then
-        ppm="$DIR/${1:-shot}.ppm"
+        ppm="$DIR/${name}.ppm"
         qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s"}}' "$ppm")" >/dev/null
         if command -v magick >/dev/null; then magick "$ppm" "$out"
         elif command -v convert >/dev/null; then convert "$ppm" "$out"
         else out="$ppm"; fi
     fi
+    if [ -n "$grid" ]; then out="$(grid_overlay "$out" "$DIR/${name}-grid.png")"; fi
     echo "$out"
+    ;;
+find)
+    # OCR the screen and print "x,y<TAB>text" per match (center of each word/line).
+    # Needs tesseract on the host. `find "Shut Down"` filters to matches; bare
+    # `find` prints everything found so you can pick a tap target.
+    command -v tesseract >/dev/null || { echo "vmkit find: tesseract not installed on host" >&2; exit 3; }
+    q="${1:-}"; png="$DIR/.ocr.png"
+    qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s","format":"png"}}' "$png")" >/dev/null 2>&1 \
+        || qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s"}}' "$png")" >/dev/null
+    tesseract "$png" - tsv 2>/dev/null | awk -v q="$q" -F'\t' '
+        NR>1 && $12!="" && $12!=" " {
+            cx=$7+$9/2; cy=$8+$10/2;
+            if (q=="" || index(tolower($12), tolower(q))>0) printf "%d,%d\t%s\n", cx, cy, $12
+        }'
     ;;
 move|tap)
     x="$1"; y="$2"; btn="${3:-left}"
@@ -246,6 +315,49 @@ view)
     done
     echo "no VNC client found (tried remote-viewer/vinagre/gvncviewer/wlvncc/vncviewer)" >&2; exit 1
     ;;
+wait)
+    # Replace ad-hoc poll loops. Subcommands print nothing; exit 0/1.
+    what="${1:-ssh}"; shift || true
+    case "$what" in
+        ssh)   to="${1:-120}"; poll "$to" 3 guest_ssh true \
+                   && echo "ssh up" || { echo "timed out ($to s) waiting for ssh" >&2; exit 1; };;
+        exec)  cmd="${1:?vmkit wait exec \"<cmd>\"}"; to="${2:-120}"
+               poll "$to" 3 guest_ssh "$cmd" \
+                   && echo "condition met" || { echo "timed out ($to s): $cmd" >&2; exit 1; };;
+        serial) re="${1:?vmkit wait serial <regex>}"; to="${2:-120}"
+               poll "$to" 2 grep -Eq "$re" "$SERIAL_LOG" \
+                   && echo "serial matched: $re" || { echo "timed out ($to s): serial !~ $re" >&2; exit 1; };;
+        screen) to="${1:-60}"; want="${2:-2}"; thresh="${VMKIT_STABLE_PX:-5000}"
+               # "Stable" = successive frames differ by fewer than THRESH pixels,
+               # so a ticking clock (a few hundred px) doesn't defeat it but a
+               # window opening/closing (many thousands) does. Needs magick.
+               command -v magick >/dev/null || { echo "vmkit wait screen needs magick" >&2; exit 3; }
+               stable=0; waited=0; prev=""
+               while [ "$waited" -lt "$to" ]; do
+                   cur="$DIR/.st-$((waited % 2)).png"
+                   qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s","format":"png"}}' "$cur")" >/dev/null 2>&1
+                   if [ -n "$prev" ]; then
+                       d=$(magick compare -metric AE -fuzz 4% "$prev" "$cur" null: 2>&1 | tr -cd '0-9'); d="${d:-999999}"
+                       if [ "$d" -lt "$thresh" ]; then stable=$((stable+1)); else stable=0; fi
+                       [ "$stable" -ge "$want" ] && { echo "screen stable (last diff ${d}px)"; exit 0; }
+                   fi
+                   prev="$cur"; sleep 1 2>/dev/null || :; waited=$((waited+1))
+               done
+               echo "timed out ($to s) waiting for a stable frame" >&2; exit 1;;
+        *) echo "usage: vmkit wait {ssh|exec <cmd>|serial <regex>|screen} [timeout]" >&2; exit 2;;
+    esac
+    ;;
+push)  # push <local> <guest-dest> — scp then sudo-install (dest may be root-owned)
+    src="${1:?vmkit push <local> <guest-dest>}"; dst="${2:?dest required}"
+    [ -f "$src" ] || { echo "vmkit push: no such file: $src" >&2; exit 2; }
+    mode=$(stat -c '%a' "$src"); tmp="/tmp/.vmkit-push.$$"
+    guest_scp "$src" "$SSH_USER@127.0.0.1:$tmp" >/dev/null
+    guest_ssh "sudo install -Dm$mode $tmp '$dst' && rm -f $tmp" && echo "pushed $src -> $dst (mode $mode)"
+    ;;
+pull)  # pull <guest-path> <local>
+    gsrc="${1:?vmkit pull <guest-path> <local>}"; ldst="${2:?local dest required}"
+    guest_scp "$SSH_USER@127.0.0.1:$gsrc" "$ldst" >/dev/null && echo "pulled $gsrc -> $ldst"
+    ;;
 serial) tail -n "${1:-60}" "$SERIAL_LOG" ;;
 ssh)    guest_ssh "$@" ;;
 qmp)    qmp "$1" ;;
@@ -258,5 +370,5 @@ down)
         P=$(cat "$PIDFILE" 2>/dev/null); [ -n "$P" ] && kill "$P" 2>/dev/null || true; fi
     rm -f "$QMP_SOCK"; echo "down"
     ;;
-*) sed -n '2,64p' "$0"; exit 2 ;;
+*) sed -n '2,74p' "$0"; exit 2 ;;
 esac

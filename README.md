@@ -42,6 +42,19 @@ bin/vmkit --overlay ~/vms/mybox/disk.qcow2 tap 640 380     # move+click a field
 bin/vmkit --overlay ~/vms/mybox/disk.qcow2 type 'hunter2'
 bin/vmkit --overlay ~/vms/mybox/disk.qcow2 keys ret
 
+# aim without guessing: grid overlay to read coords, or OCR a label
+bin/vmkit --overlay ... shot ui --grid                     # -> ui-grid.png with a ruler
+bin/vmkit --overlay ... find "Shut Down"                   # -> "1523,742  Shut Down" (needs tesseract)
+
+# block on conditions instead of hand-rolled poll loops
+bin/vmkit --overlay ... wait ssh                           # guest reachable
+bin/vmkit --overlay ... wait exec 'pgrep -x waybar' 30     # a guest condition
+bin/vmkit --overlay ... wait screen                        # a stable frame (tolerates a ticking clock)
+
+# iterate on guest files without a rebuild
+bin/vmkit --overlay ... push ./sysinit.vim /etc/xdg/nvim/sysinit.vim
+bin/vmkit --overlay ... pull /var/log/get-hypr-de.log ./install.log
+
 # human: join the same VM live (run from your own graphical session)
 bin/vmkit --overlay ~/vms/mybox/disk.qcow2 view            # opens a VNC client
 
