@@ -595,7 +595,7 @@ xexec)  # run a command inside the guest's graphical (systemd --user) session,
         # resolving XDG_RUNTIME_DIR + WAYLAND_DISPLAY/DISPLAY/etc. so GUI apps
         # launch on the desktop without hand-set env. Generic for Linux guests.
     [ $# -gt 0 ] || { echo "usage: vmkit xexec <cmd...>" >&2; exit 2; }
-    stamped xexec "$*" "${ssh_argv[@]}" "$(xexec_cmd "$@")"
+    stamped xexec "$(remote_cmd "$@")" "${ssh_argv[@]}" "$(xexec_cmd "$@")"
     ;;
 watch)  # emit a line whenever the screen changes beyond VMKIT_STABLE_PX, until
         # timeout. Pairs with the harness Monitor for motion-aware waiting.
@@ -633,7 +633,7 @@ image)  # image pull <url> [dest] — fetch a base cloud image
     curl -fL "$url" -o "$dest" && echo "pulled $dest"
     ;;
 serial) tail -n "${1:-60}" "$SERIAL_LOG" ;;
-ssh)    if [ $# -eq 0 ]; then guest_ssh; else stamped ssh "$*" "${ssh_argv[@]}" "$(remote_cmd "$@")"; fi ;;
+ssh)    if [ $# -eq 0 ]; then guest_ssh; else stamped ssh "$(remote_cmd "$@")" "${ssh_argv[@]}" "$(remote_cmd "$@")"; fi ;;
 qmp)    qmp "$1" ;;
 hmp)    hmp "$*" ;;
 snapshots) hmp "info snapshots" ;;
