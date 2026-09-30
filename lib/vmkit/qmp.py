@@ -40,6 +40,8 @@ class QMP:
         while b"\n" not in self.buf:
             if self.stop is not None and self.stop.is_set():
                 raise QMPInterrupted("stopped while waiting for a reply")
+            if time.monotonic() >= deadline:    # also when bytes keep coming, no newline
+                raise TimeoutError(f"no complete reply in {self.timeout:g} s")
             try:
                 chunk = self.sock.recv(65536)
             except socket.timeout:

@@ -193,6 +193,27 @@ class CaptureErrors(unittest.TestCase):
         self.assertIsNone(R.error)
         self.assertEqual(len(R.ts), 3)
 
+    def test_reply_deadline_holds_against_a_fast_trickle(self):
+        from vmkit.qmp import QMP
+
+        def trickle(f):      # bytes every 0.1 s, never a newline
+            while not self.srv.closing.wait(0.1):
+                f.write(b" ")
+        self.srv.handlers["screendump"] = lambda args: trickle
+        q = QMP(self.srv.path, timeout=1.0, stop=threading.Event())
+        out = {}
+
+        def call():
+            try:
+                q.cmd("screendump", {"filename": "x"})
+            except OSError as e:
+                out["e"] = e
+        t = threading.Thread(target=call, daemon=True); t.start()
+        t.join(3)
+        self.assertFalse(t.is_alive(), "no timeout: bytes keep arriving")
+        self.assertIsInstance(out.get("e"), TimeoutError)
+        q.close()
+
     def test_eof_is_fatal(self):
         self.srv.handlers["screendump"] = lambda args: (lambda f: f.close())   # QEMU went away
         R = self.recorder()
