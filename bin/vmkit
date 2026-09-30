@@ -672,20 +672,32 @@ down)
     # Wait on the qemu process itself, not on the ssh port (slirp keeps the
     # forwarded port listening for as long as qemu runs, guest or no guest).
     # qemu deletes its pidfile on exit, so read the pid before powering down,
-    # and only ever signal it while its cmdline still names qemu (pid reuse).
-    # A running recorder is stopped first so it writes its summary.
+    # and only ever signal it while its cmdline is still THIS VM's qemu (its
+    # -pidfile is ours: pid reuse, other VMs). A running recorder is stopped
+    # first so it writes its summary.
     if [ -f "$REC_PID" ]; then "$0" --dir "$DIR" record stop || true; fi
     P=$(cat "$PIDFILE" 2>/dev/null || true)
-    qemu_alive() { local c; [ -n "$P" ] && kill -0 "$P" 2>/dev/null && c=$(tr '\0' ' ' <"/proc/$P/cmdline" 2>/dev/null) && [[ "$c" == *qemu-system* ]]; }
+    qemu_alive() { local c; [ -n "$P" ] && kill -0 "$P" 2>/dev/null && c=$(tr '\0' ' ' <"/proc/$P/cmdline" 2>/dev/null) && [[ "$c" == *qemu-system*" -pidfile $PIDFILE "* ]]; }
+    qmp_alive() { [ -S "$QMP_SOCK" ] && qmp '{"execute":"query-status"}' >/dev/null 2>&1; }
     wait_gone() {  # wait_gone <seconds>
         local i=0; while qemu_alive; do [ "$i" -ge "$1" ] && return 1; sleep 1 2>/dev/null || :; i=$((i+1)); done
     }
     [ -S "$QMP_SOCK" ] && qmp '{"execute":"system_powerdown"}' >/dev/null 2>&1 || true
-    if ! wait_gone "${VMKIT_DOWN_TIMEOUT:-60}"; then
-        echo "vmkit down: guest ignored powerdown; SIGTERM qemu pid $P" >&2
-        kill "$P" 2>/dev/null || true
-        if ! wait_gone 10; then echo "vmkit down: SIGKILL qemu pid $P" >&2; kill -9 "$P" 2>/dev/null || true; wait_gone 5 || true; fi
+    if qemu_alive; then
+        if ! wait_gone "${VMKIT_DOWN_TIMEOUT:-60}"; then
+            echo "vmkit down: guest ignored powerdown; SIGTERM qemu pid $P" >&2
+            kill "$P" 2>/dev/null || true
+            if ! wait_gone 10; then echo "vmkit down: SIGKILL qemu pid $P" >&2; kill -9 "$P" 2>/dev/null || true; wait_gone 5 || true; fi
+        fi
+    else
+        # No live pid to wait on (no/empty/stale pidfile): wait for QMP to stop answering.
+        i=0; while qmp_alive; do
+            if [ "$i" -ge "${VMKIT_DOWN_TIMEOUT:-60}" ]; then
+                echo "vmkit down: state unknown: no qemu pid in $PIDFILE, and QEMU still answers on $QMP_SOCK after powerdown (nothing signalled; vmkit qmp '{\"execute\":\"quit\"}' stops it)" >&2
+                exit 1; fi
+            sleep 1 2>/dev/null || :; i=$((i+1)); done
     fi
+    qemu_alive || rm -f "$PIDFILE"      # qemu leaves it behind when SIGKILLed
     rm -f "$QMP_SOCK" "$QMP_REC_SOCK"; echo "down"
     ;;
 *) sed -n '2,/^set -euo pipefail/p' "$0" | sed '$d'; exit 2 ;;

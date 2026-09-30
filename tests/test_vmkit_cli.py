@@ -3,7 +3,10 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 import unittest
 
 from .fakeqmp import FakeQMP
@@ -173,6 +176,60 @@ class VmkitCLI(unittest.TestCase):
             r = self.vmkit(*args)
             self.assertNotEqual(r.returncode, 0, args)
             self.assertEqual(os.listdir(self.shm), [], args)
+
+
+    # ---- down ----------------------------------------------------------------
+
+    def fake_qemu(self, pidfile, ignore_term=False):
+        code = "import signal, time\n"
+        if ignore_term:
+            code += "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        code += "time.sleep(120)\n"
+        p = subprocess.Popen([sys.executable, "-c", code, "qemu-system-x86_64", "-pidfile", pidfile])
+        self.addCleanup(lambda: (p.kill(), p.wait()))
+        time.sleep(0.3)     # let it exec (its cmdline is python's by then)
+        return p
+
+    def write_pidfile(self, pid):
+        with open(os.path.join(self.dir, "qemu.pid"), "w") as f:
+            f.write(f"{pid}\n")
+
+    def test_down_does_not_signal_another_vms_qemu(self):
+        other = self.fake_qemu(os.path.join(self.td, "other", "qemu.pid"))
+        self.write_pidfile(other.pid)                   # stale pidfile, pid reused by another qemu
+        r = self.vmkit("down", env={"VMKIT_DOWN_TIMEOUT": "1"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIsNone(other.poll(), "signalled a qemu that is not this VM's")
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "qemu.pid")), "stale pidfile kept")
+
+    def test_down_removes_the_pidfile_after_sigkill(self):
+        pidfile = os.path.join(self.dir, "qemu.pid")
+        q = self.fake_qemu(pidfile, ignore_term=True)
+        self.write_pidfile(q.pid)
+        r = self.vmkit("down", env={"VMKIT_DOWN_TIMEOUT": "1"}, timeout=40)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(q.wait(5), -9)
+        self.assertFalse(os.path.exists(pidfile), "pidfile left after SIGKILL")
+
+    def test_down_without_pidfile_waits_on_qmp(self):
+        srv = self.qmp()
+
+        def powerdown(args):          # the guest shuts down: QEMU goes away shortly after replying
+            def w(f):
+                f.write(b'{"return": {}}\n')
+                threading.Timer(0.5, srv.stop).start()
+            return w
+        srv.handlers["system_powerdown"] = powerdown
+        r = self.vmkit("down", env={"VMKIT_DOWN_TIMEOUT": "5"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip(), "down")
+
+    def test_down_without_pidfile_and_qemu_still_up_is_unknown(self):
+        self.qmp()                    # answers, ignores the powerdown
+        r = self.vmkit("down", env={"VMKIT_DOWN_TIMEOUT": "2"})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertNotIn("down", r.stdout.split())
+        self.assertIn("unknown", r.stderr)
 
 
 if __name__ == "__main__":
