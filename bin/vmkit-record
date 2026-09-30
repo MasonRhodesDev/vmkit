@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""vmkit-record: the recorder process behind `vmkit record` (see lib/vmkit/record.py)."""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "lib"))
+from vmkit.record import main  # noqa: E402
+
+sys.exit(main())
