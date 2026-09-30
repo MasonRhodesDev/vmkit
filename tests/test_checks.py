@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import shutil
@@ -5,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from vmkit import checks as C
 from vmkit import checkcli as CLI
@@ -336,6 +338,42 @@ class Evaluate(Tmp):
         self.assertEqual(CLI.aggregate([P, E], "all"), "error")
         self.assertEqual(CLI.aggregate([P, F], "all"), "fail")
         self.assertEqual(CLI.aggregate([P, P], "all"), "pass")
+
+    def test_batch_bad_fields_are_per_expectation_errors(self):
+        notimg = os.path.join(self.td, "notimg.png")
+        with open(notimg, "w") as f:
+            f.write("not an image")
+        px = dict(action=0, at="+0ms..+100ms", check="pixel", region=[20, 20, 10, 10], color="#00b4ff")
+        exps = [dict(px, id="tol-null", tolerance=None),
+                dict(px, id="tol-str", tolerance="x"),
+                dict(px, id="frac-str", min_fraction="most"),
+                dict(action=0, at="+30ms..+100ms", check="changed", id="minpx-str", min_px="x"),
+                dict(action=0, at="+30ms..+100ms", check="changed", id="fuzz-null", fuzz=None),
+                dict(px, id="at-null", at=None),
+                dict(px, id="good")]
+        exp = os.path.join(self.td, "expect.json")
+        with open(exp, "w") as f:
+            json.dump(exps, f)
+        out = os.path.join(self.td, "results.json")
+        with mock.patch("sys.stdout", new_callable=io.StringIO):
+            rc = CLI.main(["batch", "--run", self.run_dir, exp, "-o", out])
+        self.assertEqual(rc, 2)
+        with open(out) as f:
+            res = {r["id"]: r for r in json.load(f)}
+        self.assertEqual(res.pop("good")["status"], "pass")
+        for k, r in res.items():
+            self.assertEqual(r["status"], "error", k)
+            self.assertTrue(r.get("error"), k)
+
+    def test_template_unreadable_files_are_errors(self):
+        notimg = os.path.join(self.td, "notimg.png")
+        with open(notimg, "w") as f:
+            f.write("not an image")
+        frame = os.path.join(self.run_dir, "frames", "000000.png")
+        with mock.patch.object(C, "MAGICK", "magick"):     # past the "needs ImageMagick" gate
+            r1 = C.run_check("template", frame, {"image": notimg, "region": [0, 0, 0, 0]})
+            r2 = C.run_check("template", frame + ".missing", {"image": frame, "region": [0, 0, 0, 0]})
+        self.assertEqual((r1["status"], r2["status"]), ("error", "error"))
 
     def test_batch_cli(self):
         exp = os.path.join(self.td, "expect.json")

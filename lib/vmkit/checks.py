@@ -305,7 +305,7 @@ def run_check(kind, frame_path, spec, baseline_path=None, base_dir="."):
                                spec.get("threshold", 0.9), spec.get("metric"))
         else:
             raise CheckError(f"unknown check {kind!r} (want one of {', '.join(CHECKS)})")
-    except CheckError as e:
+    except (CheckError, ValueError, TypeError, OSError) as e:   # bad field types, unreadable files
         return {"status": "error", "passed": None, "error": str(e)}
     if spec.get("not"):
         ok = not ok

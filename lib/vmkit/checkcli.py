@@ -73,7 +73,7 @@ def evaluate(run, frames, actions, exp, base_dir="."):
             out["baseline"] = {"n": bf["n"], "t": bf["t"], "path": base}
             if bf.get("inactive"):
                 raise T.TimelineError("the baseline frame is inactive (display output off)")
-    except (T.TimelineError, ValueError, KeyError) as e:
+    except (T.TimelineError, ValueError, TypeError, KeyError) as e:
         out.update(status="error", error=str(e))
         return out
     for f in sel:
@@ -152,7 +152,15 @@ def main_batch(argv):
         exps = exps.get("expect", [])
     frames, actions = T.load_frames(run), T.load_actions(run)
     base_dir = os.path.dirname(os.path.abspath(a.expect))
-    results = [evaluate(run, frames, actions, e, base_dir) for e in exps]
+    results = []
+    for e in exps:
+        try:
+            results.append(evaluate(run, frames, actions, e, base_dir))
+        except Exception as x:   # backstop: one bad expectation must not lose the others' results
+            results.append({"id": e.get("id") if isinstance(e, dict) else None,
+                            "check": e.get("check") if isinstance(e, dict) else None,
+                            "at": e.get("at") if isinstance(e, dict) else None,
+                            "frames": [], "status": "error", "error": f"{type(x).__name__}: {x}"})
     out = a.out or os.path.join(run, "results.json")
     with open(out, "w") as f:
         json.dump(results, f, indent=1)
