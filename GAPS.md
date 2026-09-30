@@ -117,6 +117,11 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
   errors as text in `"return"`, so any output from savevm/loadvm (or text
   starting "Error") is a nonzero exit. Their socket timeout is
   `VMKIT_SNAPSHOT_TIMEOUT` (default 600 s). New: `hmp LINE`, `snapshots`.
+  Found in validation: a failed loadvm leaves QEMU stopped in `restore-vm`, and
+  QEMU restarts the VM after a good loadvm only if it was running, so the next
+  restore also stayed stopped (ssh "banner exchange" timeouts). `restore` now
+  resumes (`cont`) after a good loadvm when the VM was running or in
+  `restore-vm`, and says so when a failed loadvm leaves it stopped.
 - **`ssh`/`xexec` joined args with spaces**, so `ssh printf '%s\n' 'a b'` lost
   its quoting. Fixed: two or more args are an argv, each quoted with
   `printf %q`; a single arg is still a shell command line (`ssh 'a | b'`).

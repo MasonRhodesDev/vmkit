@@ -642,7 +642,20 @@ snapshots) hmp "info snapshots" ;;
 snapshot) n="${1:?vmkit snapshot NAME}"
           VMKIT_QMP_TIMEOUT="${VMKIT_SNAPSHOT_TIMEOUT:-600}" hmp "savevm $n" 1 && echo "snapshot $n saved" ;;
 restore)  n="${1:?vmkit restore NAME}"
-          VMKIT_QMP_TIMEOUT="${VMKIT_SNAPSHOT_TIMEOUT:-600}" hmp "loadvm $n" 1 && echo "restored $n" ;;
+          # QEMU stops the VM for loadvm and restarts it only if it was running.
+          # A FAILED loadvm leaves it stopped in "restore-vm", so a later good
+          # loadvm would not restart it either: treat restore-vm as "was running".
+          runstate() { qmp '{"execute":"query-status"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["return"]["status"])'; }
+          before=$(runstate)
+          if VMKIT_QMP_TIMEOUT="${VMKIT_SNAPSHOT_TIMEOUT:-600}" hmp "loadvm $n" 1; then
+              after=$(runstate)
+              if [ "$after" != running ] && { [ "$before" = running ] || [ "$before" = restore-vm ]; }; then
+                  qmp '{"execute":"cont"}' >/dev/null; fi
+              echo "restored $n"
+          else
+              [ "$(runstate)" = running ] || echo "vmkit restore: the VM is left stopped (QEMU does that after a failed loadvm); restore another snapshot, or resume with: vmkit qmp '{\"execute\":\"cont\"}'" >&2
+              exit 1
+          fi ;;
 down)
     # Wait on the qemu process itself, not on the ssh port (slirp keeps the
     # forwarded port listening for as long as qemu runs, guest or no guest).
