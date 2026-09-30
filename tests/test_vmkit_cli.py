@@ -212,6 +212,19 @@ class VmkitCLI(unittest.TestCase):
         self.assertIn("ionice", r.stderr)
         self.assertIn("-pidfile", argv)
 
+    def test_up_qemu_args_env_is_shell_split(self):
+        extra = "-device 'virtio-rng-pci,id=r 1'\n-smp 2  -name \"a b\""
+        r, argv = self.up({"VMKIT_QEMU_ARGS": extra})
+        self.assertEqual(argv[-6:], ["-device", "virtio-rng-pci,id=r 1", "-smp", "2", "-name", "a b"])
+
+    def test_up_qemu_args_env_bad_quoting_is_an_error(self):
+        self.fake("qemu-system-x86_64", "exit 0")      # never a real qemu
+        disk = os.path.join(self.td, "disk.qcow2")
+        open(disk, "w").close()
+        r = self.vmkit("--overlay", disk, "up", env={"VMKIT_QEMU_ARGS": "-name 'unclosed"})
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("VMKIT_QEMU_ARGS", r.stderr)
+
     # ---- down ----------------------------------------------------------------
 
     def fake_qemu(self, pidfile, ignore_term=False):

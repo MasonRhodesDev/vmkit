@@ -28,7 +28,8 @@
 #   --ionice C         VMKIT_IONICE      ionice class for qemu/recorder (3 = idle;
 #                                        "none" to skip)
 #   --qemu-arg ARG     VMKIT_QEMU_ARGS   extra qemu argv, appended last (flag is
-#                                        repeatable; the env var is word-split)
+#                                        repeatable; the env var is split with
+#                                        shell quoting rules, via python shlex)
 #
 # Collaboration: start with `--view vnc` so the agent (QMP: shot/keys/mouse) and
 # the human (a VNC client) drive the SAME running VM together. `vmkit view` opens
@@ -112,9 +113,14 @@ VIEW="${VMKIT_VIEW:-none}"
 # (3 = idle; "none" skips ionice). The host may be someone's desktop.
 NICE="${VMKIT_NICE:-19}"; IONICE="${VMKIT_IONICE:-3}"
 # Extra qemu arguments, appended last so they can override: --qemu-arg ARG
-# (repeatable, one argv element each) and/or VMKIT_QEMU_ARGS (whitespace-split).
+# (repeatable, one argv element each) and/or VMKIT_QEMU_ARGS (split like a
+# shell would, by python shlex: quotes group, newlines separate).
 QEMU_EXTRA=()
-if [ -n "${VMKIT_QEMU_ARGS:-}" ]; then read -r -a QEMU_EXTRA <<<"$VMKIT_QEMU_ARGS"; fi
+if [ -n "${VMKIT_QEMU_ARGS:-}" ]; then
+    qa=$(python3 -c 'import shlex, sys; print(" ".join(map(shlex.quote, shlex.split(sys.argv[1]))))' "$VMKIT_QEMU_ARGS" 2>/dev/null) \
+        || { echo "vmkit: cannot parse VMKIT_QEMU_ARGS (shell quoting): $VMKIT_QEMU_ARGS" >&2; exit 2; }
+    eval "QEMU_EXTRA=($qa)"
+fi
 
 args=()
 while [ $# -gt 0 ]; do

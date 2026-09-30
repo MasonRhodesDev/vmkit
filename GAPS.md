@@ -130,7 +130,7 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
   priority. Fixed: qemu runs under `nice -n $VMKIT_NICE ionice -c $VMKIT_IONICE`
   (defaults 19 and 3 = idle; `--nice`/`--ionice`, `--ionice none` to skip).
 - **No qemu passthrough** — Fixed: `--qemu-arg ARG` (repeatable) and
-  `VMKIT_QEMU_ARGS` (word-split) are appended to qemu's argv, last, so they can
+  `VMKIT_QEMU_ARGS` (split with shell quoting rules) are appended to qemu's argv, last, so they can
   override vmkit's defaults.
 - **`down` took "ssh port still listening" for "guest up"** — slirp's hostfwd
   listens for as long as qemu runs, so that test said nothing about the guest.
