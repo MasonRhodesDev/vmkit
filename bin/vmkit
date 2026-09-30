@@ -30,7 +30,10 @@
 # from a graphical shell; `--view none` (default) is agent-only headless.
 #
 # Commands:
-#   up                       boot with serial+QMP; view per --view (none|vnc[:N]|gtk)
+#   up                       boot with serial+QMP; view per --view (none|vnc[:N]|gtk).
+#                            Two QMP sockets: qmp.sock (every vmkit command) and
+#                            qmp-rec.sock (reserved for the long-lived recorder;
+#                            a QMP socket serves one client at a time)
 #   view                     open a VNC client to the shared view (human side)
 #   status                   sockets, ssh reachability, run-state
 #   shot [name] [--grid]     screendump -> <dir>/<name>.png; --grid overlays a
@@ -102,7 +105,7 @@ cmd="${1:-status}"; shift || true
 
 [ -n "$DIR" ] || { [ -n "$OVERLAY" ] && DIR="$(dirname "$OVERLAY")/.vmkit" || DIR="$PWD/.vmkit"; }
 mkdir -p "$DIR"
-QMP_SOCK="$DIR/qmp.sock"; SERIAL_LOG="$DIR/serial.log"; PIDFILE="$DIR/qemu.pid"
+QMP_SOCK="$DIR/qmp.sock"; QMP_REC_SOCK="$DIR/qmp-rec.sock"; SERIAL_LOG="$DIR/serial.log"; PIDFILE="$DIR/qemu.pid"
 KNOWN="$DIR/known_hosts"; VNCFILE="$DIR/vnc"
 # Host-side python helpers (stdlib) live in <repo>/lib/vmkit.
 VMKIT_LIB="$(cd "$(dirname "$(readlink -f "$0")")/../lib" && pwd)"
@@ -279,7 +282,7 @@ up)
     [ -n "$OVERLAY" ] && [ -f "$OVERLAY" ] || { echo "vmkit: --overlay PATH required (got '$OVERLAY')" >&2; exit 2; }
     if [ -S "$QMP_SOCK" ] && qmp '{"execute":"query-status"}' >/dev/null 2>&1; then
         echo "already up (qmp $QMP_SOCK, ssh $SSH_PORT)"; exit 0; fi
-    rm -f "$QMP_SOCK" "$VNCFILE"; : >"$SERIAL_LOG"
+    rm -f "$QMP_SOCK" "$QMP_REC_SOCK" "$VNCFILE"; : >"$SERIAL_LOG"
     case "$VIEW" in
         none)      disp=(-display none);;
         gtk)       disp=(-display gtk,show-cursor=on);;
@@ -321,12 +324,14 @@ up)
         "${gpu[@]}" "${disp[@]}" \
         -serial file:"$SERIAL_LOG" \
         -qmp unix:"$QMP_SOCK",server,nowait \
+        -qmp unix:"$QMP_REC_SOCK",server,nowait \
         -device virtio-tablet-pci "${usb[@]}" -device usb-kbd -audio none \
         -pidfile "$PIDFILE" &
     echo "   qemu pid $!"
     ;;
 status)
     echo "qmp   : $([ -S "$QMP_SOCK" ] && echo "$QMP_SOCK" || echo absent)"
+    echo "qmprec: $([ -S "$QMP_REC_SOCK" ] && echo "$QMP_REC_SOCK" || echo absent)"
     echo "ssh   : 127.0.0.1:$SSH_PORT $(ss -ltn 2>/dev/null | grep -q ":$SSH_PORT " && echo listening || echo down)"
     [ -S "$QMP_SOCK" ] && echo "state : $(qmp '{"execute":"query-status"}' 2>/dev/null)"
     guest_ssh 'echo "guest : reachable ($(uname -sr))"' 2>/dev/null || echo "guest : not reachable (yet)"
@@ -562,7 +567,7 @@ down)
     for _ in $(seq 1 20); do ss -ltn 2>/dev/null | grep -q ":$SSH_PORT " || break; guest_ssh true 2>/dev/null || true; done
     if ss -ltn 2>/dev/null | grep -q ":$SSH_PORT "; then
         P=$(cat "$PIDFILE" 2>/dev/null); [ -n "$P" ] && kill "$P" 2>/dev/null || true; fi
-    rm -f "$QMP_SOCK"; echo "down"
+    rm -f "$QMP_SOCK" "$QMP_REC_SOCK"; echo "down"
     ;;
 *) sed -n '2,64p' "$0"; exit 2 ;;
 esac

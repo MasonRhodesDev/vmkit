@@ -108,3 +108,7 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
   `shot`, `wait screen` and `watch` looped on it. Fixed: every screendump asks
   for PPM (a memcpy) into /dev/shm (`VMKIT_TMP` overrides) and `shot` converts
   to PNG on the host with a stdlib encoder (`lib/vmkit/imageio.py`).
+- **One QMP socket** — a QMP chardev serves one client at a time, so a
+  long-lived recorder holding `qmp.sock` blocked every other vmkit call for
+  seconds. Fixed: `up` adds a second socket, `$DIR/qmp-rec.sock`, used only by
+  the recorder.
