@@ -663,5 +663,5 @@ down)
     fi
     rm -f "$QMP_SOCK" "$QMP_REC_SOCK"; echo "down"
     ;;
-*) sed -n '2,64p' "$0"; exit 2 ;;
+*) sed -n '2,/^set -euo pipefail/p' "$0" | sed '$d'; exit 2 ;;
 esac
