@@ -26,6 +26,8 @@
 #   --nice N           VMKIT_NICE        nice level for qemu/recorder (19)
 #   --ionice C         VMKIT_IONICE      ionice class for qemu/recorder (3 = idle;
 #                                        "none" to skip)
+#   --qemu-arg ARG     VMKIT_QEMU_ARGS   extra qemu argv, appended last (flag is
+#                                        repeatable; the env var is word-split)
 #
 # Collaboration: start with `--view vnc` so the agent (QMP: shot/keys/mouse) and
 # the human (a VNC client) drive the SAME running VM together. `vmkit view` opens
@@ -90,6 +92,10 @@ VIEW="${VMKIT_VIEW:-none}"
 # CPU/IO priority for qemu (and the recorder): nice level and ionice class
 # (3 = idle; "none" skips ionice). The host may be someone's desktop.
 NICE="${VMKIT_NICE:-19}"; IONICE="${VMKIT_IONICE:-3}"
+# Extra qemu arguments, appended last so they can override: --qemu-arg ARG
+# (repeatable, one argv element each) and/or VMKIT_QEMU_ARGS (whitespace-split).
+QEMU_EXTRA=()
+if [ -n "${VMKIT_QEMU_ARGS:-}" ]; then read -r -a QEMU_EXTRA <<<"$VMKIT_QEMU_ARGS"; fi
 
 args=()
 while [ $# -gt 0 ]; do
@@ -107,6 +113,7 @@ while [ $# -gt 0 ]; do
         --arch) ARCH="$2"; shift 2;;
         --accel) ACCEL="$2"; shift 2;;
         --nice) NICE="$2"; shift 2;;
+        --qemu-arg) QEMU_EXTRA+=("$2"); shift 2;;
         --ionice) IONICE="$2"; shift 2;;
         --) shift; args+=("$@"); break;;
         *) args+=("$1"); shift;;
@@ -369,7 +376,8 @@ up)
         -qmp unix:"$QMP_SOCK",server,nowait \
         -qmp unix:"$QMP_REC_SOCK",server,nowait \
         -device virtio-tablet-pci "${usb[@]}" -device usb-kbd -audio none \
-        -pidfile "$PIDFILE" &
+        -pidfile "$PIDFILE" \
+        ${QEMU_EXTRA[@]+"${QEMU_EXTRA[@]}"} &
     echo "   qemu pid $!"
     ;;
 status)

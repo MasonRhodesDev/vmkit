@@ -125,3 +125,6 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
 - **`up` set nice but not ionice** — qemu's disk I/O competed at normal
   priority. Fixed: qemu runs under `nice -n $VMKIT_NICE ionice -c $VMKIT_IONICE`
   (defaults 19 and 3 = idle; `--nice`/`--ionice`, `--ionice none` to skip).
+- **No qemu passthrough** — Fixed: `--qemu-arg ARG` (repeatable) and
+  `VMKIT_QEMU_ARGS` (word-split) are appended to qemu's argv, last, so they can
+  override vmkit's defaults.
