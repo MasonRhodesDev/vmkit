@@ -31,7 +31,8 @@ Outputs in the run dir:
 
 A screendump error reply (e.g. no surface during a mode switch) is logged as a
 gap, counted in summary.json's screendump_errors, and marks the recording
-degraded; the recorder gives up only after --max-errors of them in a row, or
+degraded; the recorder gives up only after --max-error-s seconds (10) of them
+in a row (time, not a count: the error reply rate varies), or
 when QEMU closes the socket or a reply times out (--qmp-timeout, default 600 s,
 so a snapshot/restore during a recording is a long gap, not the end).
   ffmpeg.log      the encoder's stderr
@@ -222,8 +223,8 @@ class Recorder:
                     gap = gap or {"t_from": t_req, "errors": 0}
                     gap["errors"] += 1; gap["reason"] = f"screendump error: {e}"
                     self.log(f"gap n={n} screendump error ({consec} in a row): {e}")
-                    if consec >= a.max_errors:
-                        self.fail(f"screendump: {consec} errors in a row, last: {e}")
+                    if now() - gap["t_from"] >= a.max_error_s * 1e9:
+                        self.fail(f"screendump errors for {a.max_error_s:g} s ({consec} in a row), last: {e}")
                         break
                     self.stop.wait(period / 1e9)
                     t_next = now()
@@ -415,8 +416,8 @@ def main(argv=None):
     ap.add_argument("--qmp-timeout", type=float, default=600.0,
                     help="seconds for one screendump reply; a savevm/loadvm on the other socket "
                          "holds QEMU's main loop that long (same default as VMKIT_SNAPSHOT_TIMEOUT)")
-    ap.add_argument("--max-errors", type=int, default=30,
-                    help="give up after this many screendump error replies in a row")
+    ap.add_argument("--max-error-s", type=float, default=10.0,
+                    help="give up after this many seconds of screendump error replies in a row")
     ap.add_argument("--mark-killed", metavar="WHY",
                     help="don't record: mark RUN's recording as killed (summary.json) and exit")
     a = ap.parse_args(argv)

@@ -88,7 +88,7 @@ class CaptureErrors(unittest.TestCase):
 
     def recorder(self, **kw):
         a = argparse.Namespace(sock=self.srv.path, run=self.run, fps=100.0, shm=self.td, ffmpeg="ffmpeg",
-                               degraded_ms=1000.0, queue=16, qmp_timeout=5.0, max_errors=30)
+                               degraded_ms=1000.0, queue=16, qmp_timeout=5.0, max_error_s=10.0)
         for k, v in kw.items():
             setattr(a, k, v)
         return record.Recorder(a)
@@ -160,12 +160,22 @@ class CaptureErrors(unittest.TestCase):
         self.assertLess(F[-1]["t"], G[0]["t_from"])
         self.assertLess(G[0]["t_from"], G[0]["t_to"])
 
-    def test_gives_up_after_consecutive_errors(self):
+    def test_gives_up_after_seconds_of_consecutive_errors(self):
         self.dumps(lambda i: i > 2)
-        R = self.recorder(max_errors=5)
+        R = self.recorder(max_error_s=0.5)
+        t0 = time.monotonic()
         self.capture(R, 3)
-        self.assertIn("5 errors in a row", R.error or "")
+        self.assertLess(time.monotonic() - t0, 2)
+        self.assertIn("screendump errors for 0.5 s", R.error or "")
         self.assertEqual(len(R.ts), 2)
+
+    def test_many_fast_errors_within_the_limit_are_a_gap(self):
+        self.dumps(lambda i: 2 < i <= 60)        # ~0.6 s of errors at 100 fps
+        R = self.recorder(max_error_s=5.0)
+        self.capture(R, 1.2)
+        self.assertIsNone(R.error)
+        self.assertEqual(R.errors, 58)
+        self.assertGreater(len(R.ts), 2)
 
     def test_stop_interrupts_a_hung_screendump(self):
         n = {"i": 0}

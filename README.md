@@ -134,7 +134,7 @@ $V report                            # -> <run>/report.html
   (`--degraded-ms`) or a screendump failed: a busy host shows up in the
   numbers instead of being assumed away. A failed screendump (an error reply)
   is a gap, not the end (each run of them is a row in `gaps.jsonl`,
-  `{t_from, t_to, errors, reason}`): the recorder stops only after 30 in a row, on
+  `{t_from, t_to, errors, reason}`): the recorder stops only after 10 s of them in a row, on
   EOF, or when one reply takes over 600 s (a snapshot/restore mid-recording
   is a long gap). The recorder runs under the same nice/ionice as qemu.
 - **Actions**: `keys`/`type`/`move`/`click`/`tap`/`tap-text`/`drag`/`scroll`
