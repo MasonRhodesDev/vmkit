@@ -75,6 +75,45 @@ class VmkitCLI(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(os.listdir(self.shm), [])
 
+    def colors(self, seq):
+        """screendump serves solid frames in these colours, the last one repeating."""
+        seq = list(seq)
+
+        def h(args):
+            self.srv.color = seq.pop(0) if len(seq) > 1 else seq[0]
+            return self.srv.screendump(args)
+        self.srv.handlers["screendump"] = h
+
+    # `magick compare` exits 1 when the images differ (checked on IM 7.1.2); under
+    # set -euo pipefail that used to end wait screen/watch silently.
+    def test_wait_screen_survives_differing_frames_fake_magick(self):
+        self.qmp()
+        n = os.path.join(self.td, "n")
+        self.fake("magick", f'if [ -e {n} ]; then echo "0 (0)" >&2; exit 0; fi; touch {n}; echo "3072 (1)" >&2; exit 1')
+        r = self.vmkit("wait", "screen", "6", "2")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("screen stable (last diff 0px)", r.stdout)
+
+    def test_watch_survives_differing_frames_fake_magick(self):
+        self.qmp()
+        self.fake("magick", 'echo "3072 (1)" >&2; exit 1')
+        r = self.vmkit("watch", "3", env={"VMKIT_STABLE_PX": "100"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("changed 3072px", r.stdout)
+
+    @unittest.skipUnless(HAVE_MAGICK, "needs ImageMagick")
+    def test_wait_screen_and_watch_real_magick(self):
+        self.qmp()
+        black, white = (0, 0, 0), (255, 255, 255)
+        self.colors([black, white])            # differ once, then stable
+        r = self.vmkit("wait", "screen", "6", "2", env={"VMKIT_STABLE_PX": "100"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("screen stable (last diff 0px)", r.stdout)
+        self.colors([black, white, black, white])
+        r = self.vmkit("watch", "3", env={"VMKIT_STABLE_PX": "100"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("changed 3072px", r.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
