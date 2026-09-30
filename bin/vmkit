@@ -86,6 +86,9 @@
 #                            model-free checks on frames (explicit --frame, or
 #                            chosen from the recording like `frames`); JSON out,
 #                            exit 0 pass / 1 fail / 2 error. See bin/vmkit-check -h
+#   report [RUN] [--results FILE] [-o OUT]
+#                            report.html: per-action contact sheets with check
+#                            regions outlined, pass/fail summary, fps/degraded
 #   down                     graceful powerdown; waits on the qemu pid (up to
 #                            VMKIT_DOWN_TIMEOUT s, default 60), then TERM/KILL
 #
@@ -516,6 +519,8 @@ frames)  # select recorded frames by anchor + offset (lib/vmkit/timeline.py)
     python3 "$VMKIT_LIB/vmkit/timeline.py" --dir "$DIR" "$@" ;;
 check)   # model-free checks on recorded frames (bin/vmkit-check)
     python3 "$(dirname "$VMKIT_LIB")/bin/vmkit-check" "$@" --dir "$DIR" ;;
+report)  # report.html for a run dir (lib/vmkit/report.py)
+    python3 "$(dirname "$VMKIT_LIB")/bin/vmkit-report" --dir "$DIR" "$@" ;;
 view)
     # Shared live view for the human, alongside the agent's QMP control of the
     # same VM. Requires the VM to have been started with --view vnc[:N].
