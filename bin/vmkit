@@ -576,7 +576,9 @@ wait)
                trap 'rm -f "$TMPD"/vmkit-st.$$.*.ppm' EXIT
                while [ "$waited" -lt "$to" ]; do
                    cur="$TMPD/vmkit-st.$$.$((waited % 2)).ppm"
-                   dump_ppm "$cur"
+                   if ! dump_ppm "$cur"; then   # transient (e.g. no surface mid mode-switch): retry
+                       rm -f "$cur"; prev=""; stable=0; sleep 1 2>/dev/null || :; waited=$((waited+1)); continue
+                   fi
                    if [ -n "$prev" ]; then
                        d=$(magick compare -metric AE -fuzz 4% "$prev" "$cur" null: 2>&1 | awk 'NR==1{print int($1)}'); d="${d:-999999}"
                        if [ "$d" -lt "$thresh" ]; then stable=$((stable+1)); else stable=0; fi
@@ -612,7 +614,9 @@ watch)  # emit a line whenever the screen changes beyond VMKIT_STABLE_PX, until
     trap 'rm -f "$TMPD"/vmkit-w.$$.*.ppm' EXIT
     while [ "$waited" -lt "$to" ]; do
         cur="$TMPD/vmkit-w.$$.$((waited % 2)).ppm"
-        dump_ppm "$cur"
+        if ! dump_ppm "$cur"; then   # transient: retry next second
+            rm -f "$cur"; prev=""; sleep 1 2>/dev/null || :; waited=$((waited+1)); continue
+        fi
         if [ -n "$prev" ]; then
             d=$(magick compare -metric AE -fuzz 4% "$prev" "$cur" null: 2>&1 | awk 'NR==1{print int($1)}'); d="${d:-0}"
             [ "$d" -ge "$thresh" ] && echo "$(date -u +%H:%M:%SZ 2>/dev/null) changed ${d}px"
