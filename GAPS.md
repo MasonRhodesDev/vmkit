@@ -97,3 +97,9 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
 - `snapshot`/`restore` are broken against modern QEMU: `savevm` is an HMP command, not QMP -- `{"error": {"class": "CommandNotFound", "desc": "The command savevm has not been found"}}`. Needs `human-monitor-command` wrapping (`{"execute":"human-monitor-command","arguments":{"command-line":"savevm NAME"}}`).
 - `screendump` can stall 0.5-2 s while the guest compositor is under heavy software-GL load; timestamp each shot on the host when timing matters.
 - `xexec loginctl lock-session` locks the SSH session, not the desktop -- pass the graphical session id explicitly.
+
+## 2026-09-30 (timeline branch: gap fixes)
+- **QMP error replies were discarded** — `keys super-q` (not a qcode) printed
+  success. Fixed: every QMP client in vmkit checks each reply; an `{"error":...}`
+  exits 1 with `vmkit: qmp error: <class>: <desc>` on stderr (`vmkit qmp` still
+  prints the reply object on stdout). Timeout: `VMKIT_QMP_TIMEOUT` (default 30 s).
