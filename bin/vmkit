@@ -54,12 +54,14 @@
 #   push LOCAL GUEST-DEST    scp + sudo-install a file into the guest
 #   pull GUEST-PATH LOCAL    copy a file out of the guest
 #   xexec CMD...             run CMD in the guest's graphical (systemd --user) session
+#                            (ssh/xexec: one arg = a shell command line; several
+#                            args = an argv, each quoted with printf %q)
 #   watch [timeout]          emit a line whenever the screen changes (motion)
 #   overlay new BASE [OVL]   create a qcow2 overlay backed by BASE
 #   overlay reset [OVL]      recreate an overlay from its backing image
 #   image pull URL [DEST]    fetch a base image (needs curl)
 #   serial [N]               print last N lines of the serial/console log (default 60)
-#   ssh [CMD...]             ssh into the guest (interactive if no CMD)
+#   ssh [CMD...]             ssh into the guest (interactive if no CMD; quoting as xexec)
 #   qmp JSON                 raw QMP command object; prints the JSON reply
 #   hmp LINE                 HMP command via human-monitor-command; prints its text
 #   snapshot NAME            qcow2 internal snapshot (HMP savevm)
@@ -167,6 +169,13 @@ SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN"
           -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3
           -o BatchMode=yes)
 guest_ssh() { ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" -i "$SSH_KEY" "$SSH_USER@127.0.0.1" "$@"; }
+# ssh joins its argv with spaces into ONE remote command string, which loses
+# quoting. remote_cmd rebuilds that string: a single argument is taken as a
+# shell command line as-is (`ssh 'journalctl -b | tail'`); two or more are an
+# argv and each is quoted with printf %q (`ssh printf '%s\n' 'a b'`).
+remote_cmd() {
+    if [ $# -eq 1 ]; then printf '%s' "$1"; else printf '%q ' "$@"; fi
+}
 guest_scp() { scp "${SSH_OPTS[@]}" -P "$SSH_PORT" -i "$SSH_KEY" "$@"; }
 
 # Bounded poll instead of ad-hoc `for i in seq … sleep` loops. Prints nothing;
@@ -541,8 +550,8 @@ xexec)  # run a command inside the guest's graphical (systemd --user) session,
         # launch on the desktop without hand-set env. Generic for Linux guests.
     [ $# -gt 0 ] || { echo "usage: vmkit xexec <cmd...>" >&2; exit 2; }
     # ssh concatenates args into one remote command string, so build it: a
-    # single-quoted env-resolver prefix + the caller's command joined with $*.
-    guest_ssh 'export XDG_RUNTIME_DIR=/run/user/$(id -u); eval "$(systemctl --user show-environment 2>/dev/null | grep -E "^(WAYLAND_DISPLAY|DISPLAY|HYPRLAND_INSTANCE_SIGNATURE|DBUS_SESSION_BUS_ADDRESS|XDG_CURRENT_DESKTOP)=" | sed "s/^/export /")"; '"$*"
+    # single-quoted env-resolver prefix + the caller's command (see remote_cmd).
+    guest_ssh 'export XDG_RUNTIME_DIR=/run/user/$(id -u); eval "$(systemctl --user show-environment 2>/dev/null | grep -E "^(WAYLAND_DISPLAY|DISPLAY|HYPRLAND_INSTANCE_SIGNATURE|DBUS_SESSION_BUS_ADDRESS|XDG_CURRENT_DESKTOP)=" | sed "s/^/export /")"; '"$(remote_cmd "$@")"
     ;;
 watch)  # emit a line whenever the screen changes beyond VMKIT_STABLE_PX, until
         # timeout. Pairs with the harness Monitor for motion-aware waiting.
@@ -580,7 +589,7 @@ image)  # image pull <url> [dest] — fetch a base cloud image
     curl -fL "$url" -o "$dest" && echo "pulled $dest"
     ;;
 serial) tail -n "${1:-60}" "$SERIAL_LOG" ;;
-ssh)    guest_ssh "$@" ;;
+ssh)    if [ $# -eq 0 ]; then guest_ssh; else guest_ssh "$(remote_cmd "$@")"; fi ;;
 qmp)    qmp "$1" ;;
 hmp)    hmp "$*" ;;
 snapshots) hmp "info snapshots" ;;
