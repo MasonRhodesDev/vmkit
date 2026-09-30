@@ -56,10 +56,9 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
   qemu-system-aarch64 + edk2-aarch64 on the host).
 
 ### Still open
-- **Video/stream** — only `watch` (change events) and still `shot`; no live
-  encode. Fine for agent use; a human uses `view` (VNC).
-- **Non-text / icon targets** — `find`/`tap-text` are text-only. Want template
-  match (`magick -subimage-search`) to click an icon with no label.
+- **Non-text / icon targets** — `find`/`tap-text` are text-only. `check
+  template` can now assert an icon is present (subimage search in a region),
+  but there is no `tap-template` to click one yet.
 - **Keymap** — `type` is US-ASCII; non-US layouts, unicode, compose unmapped.
   Want layout-aware typing or clipboard paste.
 - **Multi-head / resolution changes** — pixel->abs mapping assumes one display
@@ -146,3 +145,20 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
   compare -metric AE` prints `N (fraction)`; stripping non-digits glued both
   numbers together, so any nonzero diff looked huge and a screen with a
   ticking clock never counted as stable. Fixed: take the first number.
+
+## 2026-09-30 (timeline branch: the QA loop)
+- **Video/stream — closed.** `record` captures 30 fps (PPM screendump on
+  `qmp-rec.sock`, one ffmpeg: PNG sequence + ffv1), stamped on host
+  CLOCK_MONOTONIC, with a degraded flag; actions carry `t_send`/`t_ack` on the
+  same clock; `frames`, `check`, `report` sit on top. Validated on
+  plain-hyprland (QEMU 11.1.1): 30.0 fps, interval max 35 ms, QEMU's
+  placeholder detected on DPMS off (68 inactive frames), a `vmkit qmp` call
+  during recording 30 ms (python start-up; not blocked by the recorder).
+- Still open on the timeline:
+  - `check` is slow on big regions (pure-Python `changed` loop, one
+    tesseract run per OCR frame): ~20 s for ~80 frames of a 1236x756 region.
+    Fine for post-run checks; not for live waits.
+  - Only the default console/head is recorded (multi-head: see above).
+  - `t` is the screendump reply time; the capture instant is somewhere in
+    `[t_req, t]` (p95 ~5 ms here, 0.5-2 s when QEMU stalls; see 2026-08-23).
+  - The report's video is ffv1/mkv (lossless); browsers do not play it.

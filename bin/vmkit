@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # vmkit — drive a QEMU VM as an agent: serial console, QMP control, framebuffer
-# vision (screendump -> PNG), keyboard, and mouse. Guest-OS-agnostic: it works
+# vision (screendump -> PPM -> PNG), keyboard, mouse, and a timestamped
+# recording timeline (record/frames/check/report). Guest-OS-agnostic: it works
 # at the QEMU layer (framebuffer, input, serial, QMP), not through anything the
 # guest installs, so the same commands drive Linux, BSD, Windows, an installer
 # ISO, or a kernel that never reaches userspace.
 #
 # Host needs: qemu-system-<arch>, python3 (stdlib only), openssh. Optional:
-# ImageMagick (shot --grid, wait screen/watch fuzzy-diff, old-qemu PNG
-# fallback), tesseract+langpack (find/tap-text OCR), a VNC client (view),
-# curl (image pull). See README for the full dependency table.
+# ImageMagick (shot --grid, wait screen/watch fuzzy-diff, check template),
+# tesseract+langpack (find/tap-text/check ocr), ffmpeg (record), a VNC client
+# (view), curl (image pull). See README for the full dependency table.
 #
 # Config resolves from flags, then env, then defaults:
 #   --overlay PATH     VMKIT_OVERLAY     disk image to boot (required for `up`)

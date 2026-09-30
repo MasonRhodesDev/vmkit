@@ -16,8 +16,8 @@ QEMU layer, so it holds for any guest OS.
 - `shot [name]` — screendump to `<dir>/<name>.png`; prints the path. Read that
   PNG to "see" the screen. Crop+upscale a region for small text.
 - `view` — human opens a VNC client to the same VM (needs `up --view vnc`).
-- Contract: a screenshot reflects the framebuffer at call time. There is no
-  event/stream; poll `shot` and compare for motion (see GAPS: `watch`).
+- Contract: a screenshot reflects the framebuffer at call time. For a
+  continuous, timestamped stream use `record` (below).
 
 ## Input (drives whatever surface has focus)
 - `move X Y` — pointer to pixel (X,Y). Mapped to the abs axis using the live
@@ -35,6 +35,23 @@ QEMU layer, so it holds for any guest OS.
 - `ssh [CMD...]` — run in the guest (once sshd is up); the deep-inspection path
   (`journalctl -b`, unit state, files, package queries).
 - `qmp JSON` — escape hatch: any QMP command; prints the reply object.
+
+## Timeline (record → act → check → report)
+- `record start [--fps N] [--out RUN]` / `record stop` / `record status` — a
+  separate recorder process on `qmp-rec.sock` (never blocks other commands).
+  Run dir: `frames.jsonl` `{n, t_req, t, inactive}`, `frames/%06d.png`,
+  `video.mkv` (ffv1), `segments.jsonl`, `summary.json` (fps, interval
+  p50/p95/max, `degraded`), `actions.jsonl`.
+- Every input action is stamped `t_send`/`t_ack` (host `CLOCK_MONOTONIC` ns,
+  the recorder's clock) with `ok`/`error`; `VMKIT_STEP` labels it.
+- `frames --action N|STEP [--anchor send|ack] --offset +100ms,+0ms..+400ms`
+  — frame selection by the schema's Timing rules; unresolvable = exit 2.
+- `check pixel|ocr|template|changed ...` and `check batch EXPECT.json` —
+  model-free; exit 0 pass, 1 fail, 2 error.
+- `report [RUN]` — `report.html` in the run dir.
+- Contract: a frame's content was captured within `[t_req, t]` (typically
+  < 6 ms); selection uses `t`. With `degraded=true`, frame spacing exceeded the
+  threshold somewhere; check `recorder.log` for where.
 
 ## A typical agent loop
 1. `up --view vnc` → 2. poll `shot` (or `wait`, see GAPS) until the screen is
