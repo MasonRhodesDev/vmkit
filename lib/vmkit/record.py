@@ -36,6 +36,10 @@ so a snapshot/restore during a recording is a long gap, not the end).
 Stop with SIGTERM or SIGINT: the recorder drains the queue, closes ffmpeg,
 checks that PNG count == frames.jsonl lines == video packets, and writes
 summary.json. Exit status 0 = clean, 1 = the recording hit an error.
+`vmkit record stop` SIGKILLs a recorder that outlasts VMKIT_REC_STOP_TIMEOUT,
+with its ffmpeg, and then runs `vmkit-record --run RUN --mark-killed WHY`: the
+summary.json it writes (or amends) says killed=true, degraded=true, and the
+frames already on disk stay usable.
 """
 import argparse
 import json
@@ -344,9 +348,47 @@ class Recorder:
         return 1 if self.error else 0
 
 
+def mark_killed(run, why):
+    """Write (or amend) summary.json for a recorder that was SIGKILLed: frames.jsonl
+    and the PNGs on disk stand; the video and the integrity check do not."""
+    path = os.path.join(run, "summary.json")
+    try:
+        with open(path) as f:
+            S = json.load(f)
+    except (OSError, ValueError):
+        rows = []
+        try:
+            with open(os.path.join(run, "frames.jsonl")) as f:
+                for line in f:
+                    try:
+                        rows.append(json.loads(line))
+                    except ValueError:      # a line cut short by the kill
+                        pass
+        except OSError:
+            pass
+        ts = [r["t"] for r in rows]
+        iv = sorted((ts[i] - ts[i - 1]) / 1e6 for i in range(1, len(ts)))
+        calls = sorted((r["t"] - r["t_req"]) / 1e6 for r in rows)
+        dur = (ts[-1] - ts[0]) / 1e9 if len(ts) > 1 else 0.0
+        r2 = lambda v: None if v is None else round(v, 2)  # noqa: E731
+        S = {"frames": len(rows), "target_fps": None, "duration_s": round(dur, 3),
+             "fps": round((len(ts) - 1) / dur, 2) if dur > 0 else None,
+             "interval_ms": {"p50": r2(pct(iv, 50)), "p95": r2(pct(iv, 95)), "max": r2(iv[-1] if iv else None)},
+             "screendump_call_ms": {"p50": r2(pct(calls, 50)), "p95": r2(pct(calls, 95)),
+                                    "max": r2(calls[-1] if calls else None)},
+             "inactive_frames": sum(1 for r in rows if r.get("inactive"))}
+    S["killed"] = True
+    S["degraded"] = True
+    S["error"] = S.get("error") or why
+    with open(path + ".tmp", "w") as f:
+        json.dump(S, f, indent=1)
+    os.replace(path + ".tmp", path)
+    return S
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="vmkit-record", description=__doc__.split("\n")[0])
-    ap.add_argument("--sock", required=True, help="recorder QMP socket (qmp-rec.sock)")
+    ap.add_argument("--sock", help="recorder QMP socket (qmp-rec.sock); required to record")
     ap.add_argument("--run", required=True, help="run dir (created)")
     ap.add_argument("--fps", type=float, default=30.0)
     ap.add_argument("--shm", default="/dev/shm" if os.access("/dev/shm", os.W_OK) else None,
@@ -360,7 +402,14 @@ def main(argv=None):
                          "holds QEMU's main loop that long (same default as VMKIT_SNAPSHOT_TIMEOUT)")
     ap.add_argument("--max-errors", type=int, default=30,
                     help="give up after this many screendump error replies in a row")
+    ap.add_argument("--mark-killed", metavar="WHY",
+                    help="don't record: mark RUN's recording as killed (summary.json) and exit")
     a = ap.parse_args(argv)
+    if a.mark_killed:
+        mark_killed(a.run, a.mark_killed)
+        return 0
+    if not a.sock:
+        ap.error("--sock is required")
     os.makedirs(a.run, exist_ok=True)
     a.shm = a.shm or a.run
     R = Recorder(a)

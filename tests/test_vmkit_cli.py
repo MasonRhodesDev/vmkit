@@ -197,6 +197,45 @@ class VmkitCLI(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(run, "recorder.log")), "the log the error points at")
 
 
+    def test_record_stop_kills_a_recorder_that_ignores_term(self):
+        self.srv = FakeQMP(os.path.join(self.dir, "qmp-rec.sock"))
+        # an encoder that never reads: the pipe and the queue fill, and the
+        # recorder can no longer act on SIGTERM
+        self.fake("ffmpeg", "exec sleep 300")
+        run = os.path.join(self.td, "run")
+        r = self.vmkit("record", "start", "--out", run)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(self.dir, "record.pid")) as f:
+            rp = int(f.read())
+        self.addCleanup(lambda: subprocess.run(["kill", "-KILL", "--", f"-{rp}"], capture_output=True))
+        time.sleep(2)
+        kids = subprocess.run(["pgrep", "-P", str(rp)], capture_output=True, text=True).stdout.split()
+        self.assertTrue(kids, "no ffmpeg child")
+        t0 = time.monotonic()
+        r = self.vmkit("record", "stop", env={"VMKIT_REC_STOP_TIMEOUT": "2"}, timeout=60)
+        self.assertLess(time.monotonic() - t0, 15, "record stop did not escalate")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("killed", r.stdout + r.stderr)
+        time.sleep(0.5)
+        for pid in [rp] + [int(k) for k in kids]:
+            try:
+                with open(f"/proc/{pid}/stat") as f:
+                    state = f.read().split()[2]
+            except OSError:
+                state = "gone"
+            self.assertIn(state, ("gone", "Z"), f"pid {pid} still running")
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "record.pid")))
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "record.run")))
+        with open(os.path.join(run, "summary.json")) as f:
+            S = json.load(f)
+        self.assertTrue(S["killed"])
+        self.assertTrue(S["degraded"])
+        self.assertGreater(S["frames"], 0)
+        with open(os.path.join(run, "frames.jsonl")) as f:
+            self.assertEqual(S["frames"], sum(1 for _ in f))
+        r = self.vmkit("record", "status")
+        self.assertEqual(r.stdout.strip(), "not recording")
+
     # ---- scratch PPMs are removed on failure --------------------------------
 
     def dump_then(self, reply):

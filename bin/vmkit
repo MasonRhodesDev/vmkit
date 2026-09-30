@@ -526,14 +526,23 @@ record)
         echo "$out"
         ;;
     stop)
+        # TERM, then after VMKIT_REC_STOP_TIMEOUT s (default 5) KILL the
+        # recorder's process group (it is a session leader: that includes its
+        # ffmpeg), e.g. when a hung QEMU or encoder keeps it from acting on TERM.
+        # record.pid/record.run go only once it is gone.
         rec_alive || { rm -f "$REC_PID" "$REC_RUN"; echo "vmkit record: not recording" >&2; exit 1; }
-        p=$(cat "$REC_PID"); out=$(cat "$REC_RUN")
-        rm -f "$REC_RUN"        # actions stop going to the run dir
-        kill -TERM "$p"
-        i=0; while kill -0 "$p" 2>/dev/null; do
-            [ "$i" -ge 1200 ] && { echo "vmkit record: recorder pid $p still running after 120 s" >&2; exit 1; }
-            sleep 0.1 2>/dev/null || :; i=$((i+1)); done
-        rm -f "$REC_PID"
+        p=$(cat "$REC_PID"); out=$(cat "$REC_RUN"); to="${VMKIT_REC_STOP_TIMEOUT:-5}"
+        kill -TERM "$p" 2>/dev/null || :
+        i=0; while pid_running "$p" && [ "$i" -lt $((to * 10)) ]; do sleep 0.1 2>/dev/null || :; i=$((i+1)); done
+        if pid_running "$p"; then
+            echo "vmkit record: recorder pid $p ignored SIGTERM for $to s; killed it and its ffmpeg" >&2
+            kill -KILL -- "-$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null || :
+            i=0; while pid_running "$p" && [ "$i" -lt 50 ]; do sleep 0.1 2>/dev/null || :; i=$((i+1)); done
+            pid_running "$p" && { echo "vmkit record: recorder pid $p survives SIGKILL" >&2; exit 1; }
+            python3 "$(dirname "$VMKIT_LIB")/bin/vmkit-record" --run "$out" \
+                --mark-killed "killed by record stop: no exit $to s after SIGTERM" || :
+        fi
+        rm -f "$REC_PID" "$REC_RUN"
         echo "$out"
         [ -f "$out/summary.json" ] || { echo "vmkit record: no summary.json; see $out/recorder.log" >&2; exit 1; }
         python3 - "$out/summary.json" <<'PY'
