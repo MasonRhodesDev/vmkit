@@ -82,6 +82,10 @@
 #                            the schema's Timing rules (+100ms = first frame at or
 #                            after; +0ms..+400ms = every frame in the window; an
 #                            empty window is an error, exit 2)
+#   check pixel|ocr|template|changed ... | check batch EXPECT.json
+#                            model-free checks on frames (explicit --frame, or
+#                            chosen from the recording like `frames`); JSON out,
+#                            exit 0 pass / 1 fail / 2 error. See bin/vmkit-check -h
 #   down                     graceful powerdown; waits on the qemu pid (up to
 #                            VMKIT_DOWN_TIMEOUT s, default 60), then TERM/KILL
 #
@@ -510,6 +514,8 @@ PY
     ;;
 frames)  # select recorded frames by anchor + offset (lib/vmkit/timeline.py)
     python3 "$VMKIT_LIB/vmkit/timeline.py" --dir "$DIR" "$@" ;;
+check)   # model-free checks on recorded frames (bin/vmkit-check)
+    python3 "$(dirname "$VMKIT_LIB")/bin/vmkit-check" "$@" --dir "$DIR" ;;
 view)
     # Shared live view for the human, alongside the agent's QMP control of the
     # same VM. Requires the VM to have been started with --view vnc[:N].
