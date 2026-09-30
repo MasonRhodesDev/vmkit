@@ -4,3 +4,5 @@
 *.ppm
 *.qcow2
 *.log
+__pycache__/
+*.pyc
