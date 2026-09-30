@@ -483,6 +483,11 @@ record)
     # (no `| grep -q`: under pipefail its early exit SIGPIPEs the reader)
     rec_alive() { local p c; p=$(cat "$REC_PID" 2>/dev/null) && [ -n "$p" ] && pid_running "$p" || return 1
         c=$(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null); [[ "$c" == *vmkit-record* ]]; }
+    # rec_unstart <run>: a start that got no frame removes what the recorder
+    # made there, so a retry with the same --out is not "already has a
+    # recording". The logs stay (the error points at them; a retry appends).
+    rec_unstart() { rm -f "$REC_PID" "$REC_RUN" "$1/frames.jsonl" "$1/segments.jsonl" "$1/summary.json"
+        rmdir "$1/frames" 2>/dev/null || :; }
     case "$sub" in
     start)
         # record start [--fps N] [--out RUNDIR] [--degraded-ms MS]
@@ -507,7 +512,7 @@ record)
         # its exec chain (setsid, nice, ionice, python3) completes its cmdline
         # is still this script's (or empty), which rec_alive would reject.
         i=0; while ! [ -s "$out/frames.jsonl" ]; do
-            if ! pid_running "$rp"; then rm -f "$REC_PID" "$REC_RUN"
+            if ! pid_running "$rp"; then rec_unstart "$out"
                 echo "vmkit record: recorder exited; see $out/recorder.log $out/recorder.out" >&2
                 tail -3 "$out/recorder.log" "$out/recorder.out" >&2 2>/dev/null; exit 1; fi
             if [ "$i" -ge 100 ]; then   # stop it (TERM, then KILL: a hung QMP read ignores TERM)
@@ -515,7 +520,7 @@ record)
                 j=0; while pid_running "$rp" && [ "$j" -lt 20 ]; do sleep 0.1 2>/dev/null || :; j=$((j+1)); done
                 pid_running "$rp" && { kill -KILL "$rp" 2>/dev/null || :; }
                 j=0; while pid_running "$rp" && [ "$j" -lt 20 ]; do sleep 0.1 2>/dev/null || :; j=$((j+1)); done
-                rm -f "$REC_PID" "$REC_RUN"
+                rec_unstart "$out"
                 echo "vmkit record: no frame after 10 s; recorder stopped (see $out/recorder.log)" >&2; exit 1; fi
             sleep 0.1 2>/dev/null || :; i=$((i+1)); done
         echo "$out"

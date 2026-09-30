@@ -185,6 +185,16 @@ class VmkitCLI(unittest.TestCase):
         self.assertIn(state, ("gone", "Z"), "recorder still running")
         self.assertFalse(os.path.exists(os.path.join(self.dir, "record.pid")))
         self.assertFalse(os.path.exists(os.path.join(self.dir, "record.run")))
+        # a retry with the same --out is not refused as "already has a recording"; nor is
+        # one after a start whose recorder exited (here: QEMU closes the socket)
+        srv.handlers["screendump"] = lambda args: (lambda f: f.close())
+        for _ in range(2):
+            r = self.vmkit("record", "start", "--out", run, timeout=40)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertNotIn("already has a recording", r.stderr)
+            self.assertIn("recorder exited", r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(run, "frames.jsonl")))
+        self.assertTrue(os.path.exists(os.path.join(run, "recorder.log")), "the log the error points at")
 
 
     # ---- scratch PPMs are removed on failure --------------------------------
