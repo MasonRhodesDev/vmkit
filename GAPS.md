@@ -128,3 +128,9 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
 - **No qemu passthrough** — Fixed: `--qemu-arg ARG` (repeatable) and
   `VMKIT_QEMU_ARGS` (word-split) are appended to qemu's argv, last, so they can
   override vmkit's defaults.
+- **`down` took "ssh port still listening" for "guest up"** — slirp's hostfwd
+  listens for as long as qemu runs, so that test said nothing about the guest.
+  Fixed: `down` reads the qemu pid before `system_powerdown` (qemu deletes the
+  pidfile on exit), waits for that pid to exit (`VMKIT_DOWN_TIMEOUT`, default
+  60 s), then SIGTERM, then SIGKILL; it only signals a pid whose cmdline still
+  names qemu.
