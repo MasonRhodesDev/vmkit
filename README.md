@@ -118,8 +118,11 @@ $V report                            # -> <run>/report.html
   placeholder is marked `inactive`. A resolution change starts a new encoder
   segment. `stop` writes `summary.json`: fps, interval p50/p95/max,
   screendump call time, and `degraded=true` when any interval exceeded 50 ms
-  (`--degraded-ms`): a busy host shows up in the numbers instead of being
-  assumed away. The recorder runs under the same nice/ionice as qemu.
+  (`--degraded-ms`) or a screendump failed: a busy host shows up in the
+  numbers instead of being assumed away. A failed screendump (an error reply)
+  is a logged gap, not the end: the recorder stops only after 30 in a row, on
+  EOF, or when one reply takes over 600 s (a snapshot/restore mid-recording
+  is a long gap). The recorder runs under the same nice/ionice as qemu.
 - **Actions**: `keys`/`type`/`move`/`click`/`tap`/`tap-text`/`drag`/`scroll`
   (QMP) and `ssh`/`xexec` (subprocess) append `{t, cmd, args, t_send, t_ack,
   ok, error?, step?}` to `<dir>/actions.jsonl` and, while recording, to the run.

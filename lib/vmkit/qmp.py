@@ -7,6 +7,10 @@ class QMPError(Exception):
     pass
 
 
+class QMPClosed(QMPError):
+    """The server closed the connection (QEMU exited)."""
+
+
 class QMP:
     def __init__(self, path, timeout=30.0):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -30,7 +34,7 @@ class QMP:
         while True:
             line = self.f.readline()
             if not line:
-                raise QMPError("connection closed before a reply")
+                raise QMPClosed("connection closed before a reply")
             o = json.loads(line)
             if "return" in o or "error" in o:
                 return o

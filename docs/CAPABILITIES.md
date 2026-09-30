@@ -51,7 +51,8 @@ QEMU layer, so it holds for any guest OS.
 - `report [RUN]` — `report.html` in the run dir.
 - Contract: a frame's content was captured within `[t_req, t]` (typically
   < 6 ms); selection uses `t`. With `degraded=true`, frame spacing exceeded the
-  threshold somewhere; check `recorder.log` for where.
+  threshold somewhere or a screendump failed (`screendump_errors`); check
+  `recorder.log` for where.
 
 ## A typical agent loop
 1. `up --view vnc` → 2. poll `shot` (or `wait`, see GAPS) until the screen is

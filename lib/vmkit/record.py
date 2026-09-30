@@ -25,6 +25,12 @@ Outputs in the run dir:
   segments.jsonl  {"seg", "first_n", "w", "h", "video"} per encoder segment
   summary.json    fps, interval p50/p95/max, screendump call times, degraded, ...
   recorder.log    gaps over the degraded threshold, errors
+
+A screendump error reply (e.g. no surface during a mode switch) is logged as a
+gap, counted in summary.json's screendump_errors, and marks the recording
+degraded; the recorder gives up only after --max-errors of them in a row, or
+when QEMU closes the socket or a reply times out (--qmp-timeout, default 600 s,
+so a snapshot/restore during a recording is a long gap, not the end).
   ffmpeg.log      the encoder's stderr
 
 Stop with SIGTERM or SIGINT: the recorder drains the queue, closes ffmpeg,
@@ -43,7 +49,7 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from vmkit.qmp import QMP, QMPError  # noqa: E402
+from vmkit.qmp import QMP, QMPClosed, QMPError  # noqa: E402
 from vmkit.imageio import _ppm_header  # noqa: E402
 
 now = time.monotonic_ns
@@ -145,7 +151,7 @@ class Recorder:
         self.q = queue.Queue(maxsize=a.queue)
         self.logf = open(os.path.join(self.run, "recorder.log"), "a", buffering=1)
         self.enc = Encoder(self.run, a.fps, a.ffmpeg, self.log)
-        self.ts = []; self.calls = []; self.inactive = 0
+        self.ts = []; self.calls = []; self.inactive = 0; self.errors = 0
         self.put_wait_ns = 0; self.max_q = 0
 
     def log(self, msg):
@@ -186,16 +192,32 @@ class Recorder:
         except QMPError as e:
             return self.fail(f"qmp: {e}")
         frames = open(os.path.join(self.run, "frames.jsonl"), "a", buffering=1)
-        n = 0; t_next = now(); prev_t = None; was_inactive = False
+        n = 0; t_next = now(); prev_t = None; was_inactive = False; consec = 0
         try:
             while not self.stop.is_set():
                 t_req = now()
                 try:
                     qmp.cmd("screendump", {"filename": shm, "format": "ppm"})
-                except (QMPError, OSError) as e:
+                except QMPClosed as e:
                     if not self.stop.is_set():
                         self.fail(f"screendump: {e}")
                     break
+                except QMPError as e:   # an error reply (e.g. no surface mid mode-switch): a gap
+                    if self.stop.is_set():
+                        break
+                    self.errors += 1; consec += 1
+                    self.log(f"gap n={n} screendump error ({consec} in a row): {e}")
+                    if consec >= a.max_errors:
+                        self.fail(f"screendump: {consec} errors in a row, last: {e}")
+                        break
+                    self.stop.wait(period / 1e9)
+                    t_next = now()
+                    continue
+                except OSError as e:    # timeout: a late reply would desync the stream
+                    if not self.stop.is_set():
+                        self.fail(f"screendump: {e}")
+                    break
+                consec = 0
                 t = now()
                 try:
                     with open(shm, "rb") as f:
@@ -287,12 +309,13 @@ class Recorder:
             "degraded_threshold_ms": a.degraded_ms,
             "gaps_over_threshold": sum(1 for v in iv if v > a.degraded_ms),
             "inactive_frames": self.inactive,
+            "screendump_errors": self.errors,
             "encoder_backpressure_ms": round(self.put_wait_ns / 1e6, 1),
             "encoder_queue_max": self.max_q,
             "segments": self.enc.segments,
             "nice": os.getpriority(os.PRIO_PROCESS, 0),
         }
-        S["degraded"] = bool((iv and iv[-1] > a.degraded_ms) or self.error)
+        S["degraded"] = bool((iv and iv[-1] > a.degraded_ms) or self.errors or self.error)
         return S
 
     def main(self):
@@ -329,7 +352,11 @@ def main(argv=None):
     ap.add_argument("--degraded-ms", type=float, default=50.0,
                     help="an interval over this marks the recording degraded")
     ap.add_argument("--queue", type=int, default=16, help="frames buffered for the encoder")
-    ap.add_argument("--qmp-timeout", type=float, default=10.0)
+    ap.add_argument("--qmp-timeout", type=float, default=600.0,
+                    help="seconds for one screendump reply; a savevm/loadvm on the other socket "
+                         "holds QEMU's main loop that long (same default as VMKIT_SNAPSHOT_TIMEOUT)")
+    ap.add_argument("--max-errors", type=int, default=30,
+                    help="give up after this many screendump error replies in a row")
     a = ap.parse_args(argv)
     os.makedirs(a.run, exist_ok=True)
     a.shm = a.shm or a.run

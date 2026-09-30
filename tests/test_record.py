@@ -1,6 +1,17 @@
+import argparse
+import os
+import queue
+import shutil
+import tempfile
+import threading
+import time
 import unittest
+from unittest import mock
 
+from vmkit import record
 from vmkit.record import is_placeholder, pct
+
+from .fakeqmp import FakeQMP
 
 MSG = "Display output is not active."
 
@@ -58,6 +69,83 @@ class Percentile(unittest.TestCase):
         self.assertEqual(pct(v, 100), 50)
         self.assertAlmostEqual(pct(v, 95), 48)
         self.assertIsNone(pct([], 50))
+
+
+class CaptureErrors(unittest.TestCase):
+    """Recorder.capture() against a fake QMP server (no ffmpeg: the queue is drained here)."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp(prefix="vmkit-rec-")
+        self.run = os.path.join(self.td, "run")
+        os.makedirs(self.run)
+        self.srv = FakeQMP(os.path.join(self.td, "qmp-rec.sock"))
+        self.calls = 0
+
+    def tearDown(self):
+        self.srv.stop()
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def recorder(self, **kw):
+        a = argparse.Namespace(sock=self.srv.path, run=self.run, fps=100.0, shm=self.td, ffmpeg="ffmpeg",
+                               degraded_ms=1000.0, queue=16, qmp_timeout=5.0, max_errors=30)
+        for k, v in kw.items():
+            setattr(a, k, v)
+        return record.Recorder(a)
+
+    def capture(self, R, seconds):
+        def drain():
+            while True:
+                try:
+                    if R.q.get(timeout=0.1) is None:
+                        return
+                except queue.Empty:
+                    if done.is_set():
+                        return
+        done = threading.Event()
+        dt = threading.Thread(target=drain, daemon=True); dt.start()
+        ct = threading.Thread(target=R.capture, daemon=True); ct.start()
+        ct.join(seconds)
+        R.stop.set()
+        ct.join(5)
+        done.set()
+        self.assertFalse(ct.is_alive(), "capture did not stop")
+
+    def dumps(self, fail):
+        """screendump fails (error reply) on the calls for which fail(i) is true (i from 1)."""
+        def h(args):
+            self.calls += 1
+            if fail(self.calls):
+                return {"error": {"class": "GenericError", "desc": "no surface"}}
+            return self.srv.screendump(args)
+        self.srv.handlers["screendump"] = h
+
+    def test_transient_error_is_a_gap_not_the_end(self):
+        self.dumps(lambda i: i == 3)
+        R = self.recorder()
+        self.capture(R, 0.5)
+        self.assertIsNone(R.error)
+        self.assertGreater(len(R.ts), 5)
+        S = R.summary()
+        self.assertEqual(S["screendump_errors"], 1)
+        self.assertTrue(S["degraded"])
+
+    def test_gives_up_after_consecutive_errors(self):
+        self.dumps(lambda i: i > 2)
+        R = self.recorder(max_errors=5)
+        self.capture(R, 3)
+        self.assertIn("5 errors in a row", R.error or "")
+        self.assertEqual(len(R.ts), 2)
+
+    def test_eof_is_fatal(self):
+        self.srv.handlers["screendump"] = lambda args: (lambda f: f.close())   # QEMU went away
+        R = self.recorder()
+        self.capture(R, 3)
+        self.assertIn("connection closed", R.error or "")
+
+    def test_default_qmp_timeout_outlasts_savevm_loadvm(self):
+        with mock.patch.object(record, "Recorder") as Rec, mock.patch("signal.signal"):
+            record.main(["--sock", self.srv.path, "--run", self.run])
+        self.assertGreaterEqual(Rec.call_args[0][0].qmp_timeout, 600)
 
 
 if __name__ == "__main__":
