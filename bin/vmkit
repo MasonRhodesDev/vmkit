@@ -189,7 +189,8 @@ if [ "$IONICE" != none ] && command -v ionice >/dev/null; then prio+=(ionice -c 
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN"
           -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3
           -o BatchMode=yes)
-guest_ssh() { ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" -i "$SSH_KEY" "$SSH_USER@127.0.0.1" "$@"; }
+ssh_argv=(ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" -i "$SSH_KEY" "$SSH_USER@127.0.0.1")
+guest_ssh() { "${ssh_argv[@]}" "$@"; }
 # ssh joins its argv with spaces into ONE remote command string, which loses
 # quoting. remote_cmd rebuilds that string: a single argument is taken as a
 # shell command line as-is (`ssh 'journalctl -b | tail'`); two or more are an
@@ -199,9 +200,10 @@ remote_cmd() {
 }
 # Run in the guest's graphical (systemd --user) session: a single-quoted
 # env-resolver prefix + the caller's command (see remote_cmd).
-guest_xexec() {
-    guest_ssh 'export XDG_RUNTIME_DIR=/run/user/$(id -u); eval "$(systemctl --user show-environment 2>/dev/null | grep -E "^(WAYLAND_DISPLAY|DISPLAY|HYPRLAND_INSTANCE_SIGNATURE|DBUS_SESSION_BUS_ADDRESS|XDG_CURRENT_DESKTOP)=" | sed "s/^/export /")"; '"$(remote_cmd "$@")"
+xexec_cmd() {
+    printf '%s' 'export XDG_RUNTIME_DIR=/run/user/$(id -u); eval "$(systemctl --user show-environment 2>/dev/null | grep -E "^(WAYLAND_DISPLAY|DISPLAY|HYPRLAND_INSTANCE_SIGNATURE|DBUS_SESSION_BUS_ADDRESS|XDG_CURRENT_DESKTOP)=" | sed "s/^/export /")"; '"$(remote_cmd "$@")"
 }
+guest_xexec() { guest_ssh "$(xexec_cmd "$@")"; }
 guest_scp() { scp "${SSH_OPTS[@]}" -P "$SSH_PORT" -i "$SSH_KEY" "$@"; }
 
 # Bounded poll instead of ad-hoc `for i in seq … sleep` loops. Prints nothing;
@@ -264,58 +266,22 @@ fb_size() {
     python3 "$VMKIT_LIB/vmkit/imageio.py" size "$tmp"; rm -f "$tmp"
 }
 
-# Append one action to the JSONL transcript ($DIR/actions.jsonl) so a session
-# can be reviewed or replayed. Timestamp is host wall-clock.
+# Append a non-input command (e.g. shot) to the session transcript
+# ($DIR/actions.jsonl). Input actions are logged, with timestamps, by act.py.
 log_action() {
     printf '{"t":"%s","cmd":"%s","args":"%s"}\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '')" "$1" "$(printf '%s ' "${@:2}" | sed 's/"/\\"/g; s/ *$//')" \
         >> "$DIR/actions.jsonl" 2>/dev/null || true
 }
 
-# All pointer ops through one mapper (pixel -> abs axis using live fb size).
-#   pointer move X Y | tap X Y [btn] | drag X1 Y1 X2 Y2 [btn] | scroll up|down [n]
-pointer() {
-    local W H; read -r W H < <(fb_size)
-    python3 - "$QMP_SOCK" "$W" "$H" "$@" <<'PY'
-import json, socket, sys
-sp, W, H = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-op = sys.argv[4]; a = sys.argv[5:]
-def ax(x): return max(0, min(32767, round(int(x) / max(1, W-1) * 32767)))
-def ay(y): return max(0, min(32767, round(int(y) / max(1, H-1) * 32767)))
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(20); s.connect(sp)
-f = s.makefile("rwb", buffering=0); f.readline()
-f.write(b'{"execute":"qmp_capabilities"}\n'); f.readline()
-def ev(events):
-    f.write((json.dumps({"execute":"input-send-event","arguments":{"events":events}})+"\n").encode())
-    while True:
-        line = f.readline()
-        if not line: sys.exit("vmkit: qmp error: connection closed before a reply")
-        o = json.loads(line)
-        if "error" in o: sys.exit(f"vmkit: qmp error: {o['error'].get('class','')}: {o['error'].get('desc','')}")
-        if "return" in o: return
-def moveto(x,y): ev([{"type":"abs","data":{"axis":"x","value":ax(x)}},{"type":"abs","data":{"axis":"y","value":ay(y)}}])
-if op=="move":
-    moveto(a[0],a[1]); print(f"move {a[0]},{a[1]}")
-elif op=="tap":
-    btn=a[2] if len(a)>2 else "left"; moveto(a[0],a[1])
-    ev([{"type":"btn","data":{"down":True,"button":btn}}]); ev([{"type":"btn","data":{"down":False,"button":btn}}])
-    print(f"tap {a[0]},{a[1]} ({btn})")
-elif op=="drag":
-    btn=a[4] if len(a)>4 else "left"; moveto(a[0],a[1])
-    ev([{"type":"btn","data":{"down":True,"button":btn}}])
-    # a few interpolated steps so drag-aware UIs register motion
-    for i in range(1,6):
-        x=int(a[0])+(int(a[2])-int(a[0]))*i//5; y=int(a[1])+(int(a[3])-int(a[1]))*i//5; moveto(x,y)
-    ev([{"type":"btn","data":{"down":False,"button":btn}}])
-    print(f"drag {a[0]},{a[1]} -> {a[2]},{a[3]} ({btn})")
-elif op=="scroll":
-    direction=a[0]; n=int(a[1]) if len(a)>1 else 3; btn="wheel-up" if direction in ("up","u") else "wheel-down"
-    for _ in range(n): ev([{"type":"btn","data":{"down":True,"button":btn}}]); ev([{"type":"btn","data":{"down":False,"button":btn}}])
-    print(f"scroll {direction} x{n}")
-else:
-    print("bad pointer op: "+op, file=sys.stderr); sys.exit(2)
-PY
-}
+# Input actions run in lib/vmkit/act.py, which stamps each one on the host's
+# CLOCK_MONOTONIC (t_send before the first QMP write, t_ack after the last
+# reply) and appends it to actions.jsonl (and to the active recording's run
+# dir). Pointer pixels map to the abs axis using the live framebuffer size.
+act() { python3 "$VMKIT_LIB/vmkit/act.py" --dir "$DIR" --sock "$QMP_SOCK" --tmp "$TMPD" "$@"; }
+# stamped <name> <shown-args> <argv...>: run a subprocess (stdio inherited),
+# stamped and logged the same way.
+stamped() { local n="$1" shown="$2"; shift 2; python3 "$VMKIT_LIB/vmkit/act.py" --dir "$DIR" exec "$n" "$shown" -- "$@"; }
 
 # OCR the current screen -> lines of "cx cy text". mode: word (default) or line.
 ocr_screen() {
@@ -456,54 +422,20 @@ PY
 )
     [ -n "$target" ] || { echo "tap-text: no on-screen match for \"$q\"" >&2; exit 1; }
     set -- $target
-    log_action tap-text "$q" "$1" "$2"
-    pointer tap "$1" "$2" "$btn"
+    act --shown "$q $1 $2" tap-text "$1" "$2" "$btn"
     ;;
-move) log_action move "$@"; pointer move "$1" "$2" ;;
-tap)  log_action tap "$@";  pointer tap "$1" "$2" "${3:-left}" ;;
-drag) log_action drag "$@"; pointer drag "$1" "$2" "$3" "$4" "${5:-left}" ;;
-scroll) log_action scroll "$@"; pointer scroll "${1:-down}" "${2:-3}" ;;
-click)
-    btn="${1:-left}"
-    qmp "$(printf '{"execute":"input-send-event","arguments":{"events":[{"type":"btn","data":{"down":true,"button":"%s"}},{"type":"btn","data":{"down":false,"button":"%s"}}]}}' "$btn" "$btn")" >/dev/null
-    echo "click $btn"
-    ;;
+move) act move "${1:?vmkit move X Y}" "${2:?vmkit move X Y}" ;;
+tap)  act tap "${1:?vmkit tap X Y [btn]}" "${2:?vmkit tap X Y [btn]}" "${3:-left}" ;;
+drag) act drag "${1:?vmkit drag X1 Y1 X2 Y2 [btn]}" "${2:?}" "${3:?}" "${4:?}" "${5:-left}" ;;
+scroll) act scroll "${1:-down}" "${2:-3}" ;;
+click) act click "${1:-left}" ;;
 keys)
     [ $# -gt 0 ] || { echo "usage: vmkit keys K [K...]" >&2; exit 2; }
-    log_action keys "$@"
-    keys=$(printf '{"type":"qcode","data":"%s"},' "$@" | sed 's/,$//')
-    qmp "$(printf '{"execute":"send-key","arguments":{"keys":[%s]}}' "$keys")" >/dev/null
-    echo "keys: $*"
+    act keys "$@"
     ;;
 type)
     [ $# -gt 0 ] || { echo "usage: vmkit type TEXT" >&2; exit 2; }
-    log_action type "(${#*} args)"
-    python3 - "$QMP_SOCK" "$*" <<'PY'
-import json, socket, sys
-sp, text = sys.argv[1], sys.argv[2]
-base = {c: c for c in "abcdefghijklmnopqrstuvwxyz0123456789"}
-base.update({" ":"spc", ".":"dot", ",":"comma", "-":"minus", "/":"slash",
-             "=":"equal", ";":"semicolon", "'":"apostrophe", "\n":"ret", "\t":"tab"})
-shifted = {"!":"1","@":"2","#":"3","$":"4","%":"5","^":"6","&":"7","*":"8","(":"9",")":"0",
-           "_":"minus","+":"equal",":":"semicolon","\"":"apostrophe","?":"slash","<":"comma",">":"dot"}
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(30); s.connect(sp)
-f = s.makefile("rwb", buffering=0); f.readline()
-f.write(b'{"execute":"qmp_capabilities"}\n'); f.readline()
-def send(keys):
-    f.write((json.dumps({"execute":"send-key","arguments":{"keys":keys}})+"\n").encode())
-    while True:
-        line = f.readline()
-        if not line: sys.exit("vmkit: qmp error: connection closed before a reply")
-        o = json.loads(line)
-        if "error" in o: sys.exit(f"vmkit: qmp error: {o['error'].get('class','')}: {o['error'].get('desc','')}")
-        if "return" in o: return
-for ch in text:
-    if ch in shifted: send([{"type":"qcode","data":"shift"},{"type":"qcode","data":shifted[ch]}])
-    elif ch.isupper() and ch.lower() in base: send([{"type":"qcode","data":"shift"},{"type":"qcode","data":base[ch.lower()]}])
-    elif ch in base: send([{"type":"qcode","data":base[ch]}])
-    else: sys.stderr.write(f"vmkit type: no mapping for {ch!r}, skipped\n")
-print("typed", len(text), "chars")
-PY
+    act type "$*"
     ;;
 view)
     # Shared live view for the human, alongside the agent's QMP control of the
@@ -579,7 +511,7 @@ xexec)  # run a command inside the guest's graphical (systemd --user) session,
         # resolving XDG_RUNTIME_DIR + WAYLAND_DISPLAY/DISPLAY/etc. so GUI apps
         # launch on the desktop without hand-set env. Generic for Linux guests.
     [ $# -gt 0 ] || { echo "usage: vmkit xexec <cmd...>" >&2; exit 2; }
-    guest_xexec "$@"
+    stamped xexec "$*" "${ssh_argv[@]}" "$(xexec_cmd "$@")"
     ;;
 watch)  # emit a line whenever the screen changes beyond VMKIT_STABLE_PX, until
         # timeout. Pairs with the harness Monitor for motion-aware waiting.
@@ -617,7 +549,7 @@ image)  # image pull <url> [dest] — fetch a base cloud image
     curl -fL "$url" -o "$dest" && echo "pulled $dest"
     ;;
 serial) tail -n "${1:-60}" "$SERIAL_LOG" ;;
-ssh)    if [ $# -eq 0 ]; then guest_ssh; else guest_ssh "$(remote_cmd "$@")"; fi ;;
+ssh)    if [ $# -eq 0 ]; then guest_ssh; else stamped ssh "$*" "${ssh_argv[@]}" "$(remote_cmd "$@")"; fi ;;
 qmp)    qmp "$1" ;;
 hmp)    hmp "$*" ;;
 snapshots) hmp "info snapshots" ;;
