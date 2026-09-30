@@ -40,8 +40,8 @@ so a snapshot/restore during a recording is a long gap, not the end).
 Stop with SIGTERM or SIGINT: the recorder drains the queue, closes ffmpeg,
 checks that PNG count == frames.jsonl lines == video packets, and writes
 summary.json. Exit status 0 = clean, 1 = the recording hit an error.
-`vmkit record stop` SIGKILLs a recorder that outlasts VMKIT_REC_STOP_TIMEOUT,
-with its ffmpeg, and then runs `vmkit-record --run RUN --mark-killed WHY`: the
+`vmkit record stop` SIGKILLs a recorder that outlasts VMKIT_REC_STOP_TIMEOUT
+(30 s), with its ffmpeg, and then runs `vmkit-record --run RUN --mark-killed WHY`: the
 summary.json it writes (or amends) says killed=true, degraded=true, and the
 frames already on disk stay usable.
 """

@@ -236,6 +236,42 @@ class VmkitCLI(unittest.TestCase):
         r = self.vmkit("record", "status")
         self.assertEqual(r.stdout.strip(), "not recording")
 
+    def start_recorder(self, ffmpeg):
+        self.srv = FakeQMP(os.path.join(self.dir, "qmp-rec.sock"))
+        self.fake("ffmpeg", ffmpeg)
+        run = os.path.join(self.td, "run")
+        r = self.vmkit("record", "start", "--out", run)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(self.dir, "record.pid")) as f:
+            rp = int(f.read())
+        self.addCleanup(lambda: subprocess.run(["kill", "-KILL", "--", f"-{rp}"], capture_output=True))
+        time.sleep(1)
+        return rp, run
+
+    def test_record_stop_timeout_is_checked_before_term_and_may_be_fractional(self):
+        rp, run = self.start_recorder("exec sleep 300")
+        for bad in ("abc", "-1", "1e3", "2."):
+            r = self.vmkit("record", "stop", env={"VMKIT_REC_STOP_TIMEOUT": bad})
+            self.assertEqual(r.returncode, 2, (bad, r.stdout + r.stderr))
+            self.assertIn("VMKIT_REC_STOP_TIMEOUT", r.stderr)
+            with open(f"/proc/{rp}/stat") as f:
+                self.assertNotEqual(f.read().split()[2], "Z", f"{bad}: recorder was signalled")
+            self.assertTrue(os.path.exists(os.path.join(self.dir, "record.pid")))
+        t0 = time.monotonic()
+        r = self.vmkit("record", "stop", env={"VMKIT_REC_STOP_TIMEOUT": "1.5"}, timeout=60)
+        self.assertLess(time.monotonic() - t0, 10)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("ignored SIGTERM for 1.5 s", r.stderr)
+        self.assertNotIn("syntax error", r.stderr)
+
+    def test_record_stop_default_waits_out_a_slow_clean_drain(self):
+        # the encoder takes 8 s to finish after its input ends (nice 19 under load)
+        rp, run = self.start_recorder("cat >/dev/null; sleep 8")
+        r = self.vmkit("record", "stop", env={"VMKIT_REC_STOP_TIMEOUT": ""}, timeout=90)
+        self.assertNotIn("killed", r.stdout + r.stderr)
+        with open(os.path.join(run, "summary.json")) as f:
+            self.assertNotIn("killed", json.load(f))
+
     # ---- scratch PPMs are removed on failure --------------------------------
 
     def dump_then(self, reply):

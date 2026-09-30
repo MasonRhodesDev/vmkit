@@ -526,14 +526,19 @@ record)
         echo "$out"
         ;;
     stop)
-        # TERM, then after VMKIT_REC_STOP_TIMEOUT s (default 5) KILL the
-        # recorder's process group (it is a session leader: that includes its
-        # ffmpeg), e.g. when a hung QEMU or encoder keeps it from acting on TERM.
-        # record.pid/record.run go only once it is gone.
+        # TERM, then after VMKIT_REC_STOP_TIMEOUT s (default 30, may be
+        # fractional) KILL the recorder's process group (it is a session leader:
+        # that includes its ffmpeg), e.g. when a hung QEMU or encoder keeps it
+        # from acting on TERM. A clean drain at nice 19 under load can take a
+        # while. record.pid/record.run go only once it is gone.
+        to="${VMKIT_REC_STOP_TIMEOUT:-30}"
+        [[ "$to" =~ ^([0-9]+)(\.([0-9]+))?$ ]] || {
+            echo "vmkit record: VMKIT_REC_STOP_TIMEOUT must be seconds (e.g. 30 or 2.5), got '$to'" >&2; exit 2; }
+        frac="${BASH_REMATCH[3]:-0}"; ticks=$((10#${BASH_REMATCH[1]} * 10 + 10#${frac:0:1}))
         rec_alive || { rm -f "$REC_PID" "$REC_RUN"; echo "vmkit record: not recording" >&2; exit 1; }
-        p=$(cat "$REC_PID"); out=$(cat "$REC_RUN"); to="${VMKIT_REC_STOP_TIMEOUT:-5}"
+        p=$(cat "$REC_PID"); out=$(cat "$REC_RUN")
         kill -TERM "$p" 2>/dev/null || :
-        i=0; while pid_running "$p" && [ "$i" -lt $((to * 10)) ]; do sleep 0.1 2>/dev/null || :; i=$((i+1)); done
+        i=0; while pid_running "$p" && [ "$i" -lt "$ticks" ]; do sleep 0.1 2>/dev/null || :; i=$((i+1)); done
         if pid_running "$p"; then
             echo "vmkit record: recorder pid $p ignored SIGTERM for $to s; killed it and its ffmpeg" >&2
             kill -KILL -- "-$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null || :
