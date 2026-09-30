@@ -137,6 +137,9 @@ $V report                            # -> <run>/report.html
   `{t_from, t_to, errors, reason}`): the recorder stops only after 10 s of them in a row, on
   EOF, or when one reply takes over 600 s (a snapshot/restore mid-recording
   is a long gap). The recorder runs under the same nice/ionice as qemu.
+  `record stop` sends SIGTERM and, after `VMKIT_REC_STOP_TIMEOUT` s (5),
+  SIGKILLs the recorder and its ffmpeg; `summary.json` then says
+  `killed`/`degraded` (exit 1), and the frames already on disk stand.
 - **Actions**: `keys`/`type`/`move`/`click`/`tap`/`tap-text`/`drag`/`scroll`
   (QMP) and `ssh`/`xexec` (subprocess) append `{t, cmd, args, t_send, t_ack,
   ok, error?, step?}` to `<dir>/actions.jsonl` and, while recording, to the run.
