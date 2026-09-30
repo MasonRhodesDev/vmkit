@@ -115,5 +115,32 @@ class VmkitCLI(unittest.TestCase):
         self.assertIn("changed 3072px", r.stdout)
 
 
+    # ---- record start ------------------------------------------------------
+
+    def test_record_start_timeout_kills_the_recorder_and_cleans_up(self):
+        srv = FakeQMP(os.path.join(self.dir, "qmp-rec.sock"))
+        self.srv = srv
+
+        def trickle(f):     # never completes a reply line: readline blocks, the socket timeout never fires
+            while not srv.closing.wait(0.5):
+                f.write(b" ")
+        srv.handlers["screendump"] = lambda args: trickle
+        self.fake("ffmpeg", "exit 0")
+        run = os.path.join(self.td, "run")
+        r = self.vmkit("record", "start", "--out", run, timeout=40)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("no frame after", r.stderr)
+        with open(os.path.join(run, "recorder.log")) as f:
+            pid = int(f.read().split("start pid=")[1].split()[0])
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                state = f.read().split()[2]
+        except OSError:
+            state = "gone"
+        self.assertIn(state, ("gone", "Z"), "recorder still running")
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "record.pid")))
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "record.run")))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,8 @@
 """A fake QMP server for tests: threaded AF_UNIX listener, one handler per command.
 
     srv = FakeQMP(path)                 # starts listening
-    srv.handlers["screendump"] = fn     # fn(args) -> reply dict, or None to send nothing
+    srv.handlers["screendump"] = fn     # fn(args) -> reply dict, None to send nothing,
+                                        # or a callable(f) that writes the stream itself
     ...
     srv.requests                        # [(execute, arguments), ...] in arrival order
     srv.stop()
@@ -65,7 +66,9 @@ class FakeQMP:
                 ex, args = m.get("execute"), m.get("arguments", {})
                 self.requests.append((ex, args))
                 r = self._reply(ex, args)
-                if r is not None:
+                if callable(r):              # raw control of the stream (e.g. trickle, hang)
+                    r(f)
+                elif r is not None:
                     f.write((json.dumps(r) + "\n").encode())
         except (OSError, ValueError):
             pass

@@ -490,7 +490,13 @@ record)
             if ! pid_running "$rp"; then rm -f "$REC_PID" "$REC_RUN"
                 echo "vmkit record: recorder exited; see $out/recorder.log $out/recorder.out" >&2
                 tail -3 "$out/recorder.log" "$out/recorder.out" >&2 2>/dev/null; exit 1; fi
-            [ "$i" -ge 100 ] && { echo "vmkit record: no frame after 10 s" >&2; exit 1; }
+            if [ "$i" -ge 100 ]; then   # stop it (TERM, then KILL: a hung QMP read ignores TERM)
+                kill -TERM "$rp" 2>/dev/null || :
+                j=0; while pid_running "$rp" && [ "$j" -lt 20 ]; do sleep 0.1 2>/dev/null || :; j=$((j+1)); done
+                pid_running "$rp" && { kill -KILL "$rp" 2>/dev/null || :; }
+                j=0; while pid_running "$rp" && [ "$j" -lt 20 ]; do sleep 0.1 2>/dev/null || :; j=$((j+1)); done
+                rm -f "$REC_PID" "$REC_RUN"
+                echo "vmkit record: no frame after 10 s; recorder stopped (see $out/recorder.log)" >&2; exit 1; fi
             sleep 0.1 2>/dev/null || :; i=$((i+1)); done
         echo "$out"
         ;;
