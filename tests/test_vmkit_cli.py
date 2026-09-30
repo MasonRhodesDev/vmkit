@@ -178,6 +178,16 @@ class VmkitCLI(unittest.TestCase):
             self.assertEqual(os.listdir(self.shm), [], args)
 
 
+    def test_shot_logs_valid_json_for_any_name(self):
+        self.qmp()
+        name = 'a\\q"b'                                 # backslash + quote
+        r = self.vmkit("shot", name)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(self.dir, "actions.jsonl")) as f:
+            recs = [json.loads(x) for x in f]
+        self.assertEqual([(x["cmd"], x["args"]) for x in recs], [("shot", name)])
+        self.assertRegex(recs[0]["t"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
     # ---- down ----------------------------------------------------------------
 
     def fake_qemu(self, pidfile, ignore_term=False):

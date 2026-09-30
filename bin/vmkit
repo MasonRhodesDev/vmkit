@@ -280,8 +280,9 @@ dump_ppm() {  # dump_ppm <out.ppm>
 # Append a non-input command (e.g. shot) to the session transcript
 # ($DIR/actions.jsonl). Input actions are logged, with timestamps, by act.py.
 log_action() {
-    printf '{"t":"%s","cmd":"%s","args":"%s"}\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '')" "$1" "$(printf '%s ' "${@:2}" | sed 's/"/\\"/g; s/ *$//')" \
+    python3 -c 'import json, sys, time
+print(json.dumps({"t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "cmd": sys.argv[1],
+                  "args": " ".join(sys.argv[2:]).rstrip(" ")}))' "$@" \
         >> "$DIR/actions.jsonl" 2>/dev/null || true
 }
 
