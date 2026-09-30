@@ -8,7 +8,7 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
 ## Present today (v0)
 
 - Headless boot with `-serial file:` + `-qmp` (pre-SSH console + control).
-- Vision: QMP `screendump` -> PNG (PPM+convert fallback for old qemu).
+- Vision: QMP `screendump` -> PPM, converted to PNG on the host (stdlib).
 - Keyboard: `send-key` (`keys`, `type`, US-ASCII map).
 - Mouse: `input-send-event`, pixel->abs mapped from live framebuffer size
   (`move`, `click`, `tap`).
@@ -103,3 +103,8 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
   success. Fixed: every QMP client in vmkit checks each reply; an `{"error":...}`
   exits 1 with `vmkit: qmp error: <class>: <desc>` on stderr (`vmkit qmp` still
   prints the reply object on stdout). Timeout: `VMKIT_QMP_TIMEOUT` (default 30 s).
+- **PNG screendumps stalled the guest** — QEMU's PNG encoder costs ~30 ms per
+  call inside QEMU and halved the guest's frame rate in the recording spike;
+  `shot`, `wait screen` and `watch` looped on it. Fixed: every screendump asks
+  for PPM (a memcpy) into /dev/shm (`VMKIT_TMP` overrides) and `shot` converts
+  to PNG on the host with a stdlib encoder (`lib/vmkit/imageio.py`).

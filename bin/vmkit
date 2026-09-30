@@ -104,6 +104,12 @@ cmd="${1:-status}"; shift || true
 mkdir -p "$DIR"
 QMP_SOCK="$DIR/qmp.sock"; SERIAL_LOG="$DIR/serial.log"; PIDFILE="$DIR/qemu.pid"
 KNOWN="$DIR/known_hosts"; VNCFILE="$DIR/vnc"
+# Host-side python helpers (stdlib) live in <repo>/lib/vmkit.
+VMKIT_LIB="$(cd "$(dirname "$(readlink -f "$0")")/../lib" && pwd)"
+# Scratch for raw screendumps: tmpfs when available (a 1280x800 PPM is ~3 MB).
+if [ -n "${VMKIT_TMP:-}" ]; then TMPD="$VMKIT_TMP"
+elif [ -d /dev/shm ] && [ -w /dev/shm ]; then TMPD=/dev/shm
+else TMPD="$DIR"; fi
 
 # ---- QMP helper: negotiate, run one command, print the reply object ----------
 # Prints the reply object on stdout. An {"error":...} reply (or no reply) also
@@ -182,19 +188,20 @@ PY
         "$out" 2>/dev/null && echo "$out" || echo "$in"
 }
 
+# Screendump as PPM. QEMU's PNG encoder runs inside QEMU (~30 ms per call) and
+# stalls the guest's display (halves its frame rate); PPM is a memcpy. Callers
+# convert on the host when they need PNG. QEMU < 7.1 has no "format" argument
+# but writes PPM by default, so fall back to that.
+dump_ppm() {  # dump_ppm <out.ppm>
+    qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s","format":"ppm"}}' "$1")" >/dev/null 2>&1 \
+        || qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s"}}' "$1")" >/dev/null
+}
+
 # framebuffer WxH from a throwaway screendump (needed to map pixels -> abs axis)
 fb_size() {
-    local tmp="$DIR/.size.png"
-    qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s","format":"png"}}' "$tmp")" >/dev/null 2>&1 || \
-        qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s"}}' "$tmp")" >/dev/null
-    python3 - "$tmp" <<'PY'
-import struct, sys
-d = open(sys.argv[1], "rb").read(33)
-if d[:8] == b"\x89PNG\r\n\x1a\n":
-    w, h = struct.unpack(">II", d[16:24]); print(w, h)
-elif d[:2] == b"P6":                                   # PPM fallback
-    t = open(sys.argv[1], "rb").read(64).split(); print(int(t[1]), int(t[2]))
-PY
+    local tmp="$TMPD/vmkit-size.$$.ppm"
+    dump_ppm "$tmp"
+    python3 "$VMKIT_LIB/vmkit/imageio.py" size "$tmp"; rm -f "$tmp"
 }
 
 # Append one action to the JSONL transcript ($DIR/actions.jsonl) so a session
@@ -252,10 +259,9 @@ PY
 
 # OCR the current screen -> lines of "cx cy text". mode: word (default) or line.
 ocr_screen() {
-    local mode="${1:-word}" png="$DIR/.ocr.png"
-    qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s","format":"png"}}' "$png")" >/dev/null 2>&1 \
-        || qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s"}}' "$png")" >/dev/null
-    tesseract "$png" - tsv 2>/dev/null | awk -v mode="$mode" -F'\t' '
+    local mode="${1:-word}" ppm="$TMPD/vmkit-ocr.$$.ppm"
+    dump_ppm "$ppm"
+    tesseract "$ppm" - tsv 2>/dev/null | awk -v mode="$mode" -F'\t' '
         NR>1 && $12!="" && $12!=" " {
             if (mode=="line") {
                 key=$2"-"$3"-"$4"-"$5   # page-block-par-line
@@ -265,6 +271,7 @@ ocr_screen() {
             } else { printf "%d %d\t%s\n", $7+$9/2, $8+$10/2, $12 }
         }
         END { if (mode=="line") for (k in txt) printf "%d %d\t%s\n", (x0[k]+x1[k])/2, (y0[k]+y1[k])/2, txt[k] }'
+    rm -f "$ppm"
 }
 
 case "$cmd" in
@@ -328,14 +335,9 @@ shot)
     log_action shot "$@"
     grid=""; name="shot"
     for a in "$@"; do case "$a" in --grid) grid=1;; *) name="$a";; esac; done
-    out="$DIR/${name}.png"
-    if ! qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s","format":"png"}}' "$out")" >/dev/null 2>&1; then
-        ppm="$DIR/${name}.ppm"
-        qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s"}}' "$ppm")" >/dev/null
-        if command -v magick >/dev/null; then magick "$ppm" "$out"
-        elif command -v convert >/dev/null; then convert "$ppm" "$out"
-        else out="$ppm"; fi
-    fi
+    out="$DIR/${name}.png"; ppm="$TMPD/vmkit-shot.$$.ppm"
+    dump_ppm "$ppm"
+    python3 "$VMKIT_LIB/vmkit/imageio.py" ppm2png "$ppm" "$out" >/dev/null; rm -f "$ppm"
     if [ -n "$grid" ]; then out="$(grid_overlay "$out" "$DIR/${name}-grid.png")"; fi
     echo "$out"
     ;;
@@ -353,13 +355,12 @@ tap-text)
     # Uses --line grouping so multi-word labels match. Exit 1 if not found.
     command -v tesseract >/dev/null || { echo "vmkit tap-text: tesseract not installed on host" >&2; exit 3; }
     q="${1:?vmkit tap-text \"<label>\" [nth] [button]}"; nth="${2:-1}"; btn="${3:-left}"
-    png="$DIR/.ocr.png"
-    qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s","format":"png"}}' "$png")" >/dev/null 2>&1 \
-        || qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s"}}' "$png")" >/dev/null
+    ppm="$TMPD/vmkit-ocr.$$.ppm"
+    dump_ppm "$ppm"
     # Match the query as a consecutive run of words within one OCR line and
     # target the bbox of just those words (so adjacent buttons don't merge).
     # tesseract TSV goes to a file: a heredoc script can't also read stdin.
-    tesseract "$png" - tsv >"$DIR/.ocr.tsv" 2>/dev/null
+    tesseract "$ppm" - tsv >"$DIR/.ocr.tsv" 2>/dev/null; rm -f "$ppm"
     target=$(python3 - "$q" "$nth" "$DIR/.ocr.tsv" <<'PY'
 import sys
 q=sys.argv[1].lower().split(); nth=int(sys.argv[2])
@@ -482,9 +483,10 @@ wait)
                # window opening/closing (many thousands) does. Needs magick.
                command -v magick >/dev/null || { echo "vmkit wait screen needs magick" >&2; exit 3; }
                stable=0; waited=0; prev=""
+               trap 'rm -f "$TMPD"/vmkit-st.$$.*.ppm' EXIT
                while [ "$waited" -lt "$to" ]; do
-                   cur="$DIR/.st-$((waited % 2)).png"
-                   qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s","format":"png"}}' "$cur")" >/dev/null
+                   cur="$TMPD/vmkit-st.$$.$((waited % 2)).ppm"
+                   dump_ppm "$cur"
                    if [ -n "$prev" ]; then
                        d=$(magick compare -metric AE -fuzz 4% "$prev" "$cur" null: 2>&1 | tr -cd '0-9'); d="${d:-999999}"
                        if [ "$d" -lt "$thresh" ]; then stable=$((stable+1)); else stable=0; fi
@@ -519,9 +521,10 @@ watch)  # emit a line whenever the screen changes beyond VMKIT_STABLE_PX, until
         # timeout. Pairs with the harness Monitor for motion-aware waiting.
     command -v magick >/dev/null || { echo "vmkit watch needs magick" >&2; exit 3; }
     to="${1:-120}"; thresh="${VMKIT_STABLE_PX:-5000}"; waited=0; prev=""
+    trap 'rm -f "$TMPD"/vmkit-w.$$.*.ppm' EXIT
     while [ "$waited" -lt "$to" ]; do
-        cur="$DIR/.w-$((waited % 2)).png"
-        qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s","format":"png"}}' "$cur")" >/dev/null
+        cur="$TMPD/vmkit-w.$$.$((waited % 2)).ppm"
+        dump_ppm "$cur"
         if [ -n "$prev" ]; then
             d=$(magick compare -metric AE -fuzz 4% "$prev" "$cur" null: 2>&1 | tr -cd '0-9'); d="${d:-0}"
             [ "$d" -ge "$thresh" ] && echo "$(date -u +%H:%M:%SZ 2>/dev/null) changed ${d}px"

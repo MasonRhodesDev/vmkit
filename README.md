@@ -12,7 +12,7 @@ human normally gets for free:
 
 | Capability | Mechanism | Agent | Human |
 |---|---|---|---|
-| **Vision** | QMP `screendump` → PNG the agent reads | ✅ still frames | ✅ live via VNC |
+| **Vision** | QMP `screendump` → PPM, converted to PNG on the host | ✅ still frames | ✅ live via VNC |
 | **Keyboard** | QMP `send-key` (`keys`, `type`) | ✅ | ✅ via VNC |
 | **Mouse** | QMP `input-send-event`, pixel→abs mapped (`move`/`click`/`tap`) | ✅ | ✅ via VNC |
 | **Console** | `-serial file:` — the pre-SSH boot the guest never logs | ✅ | ✅ |
@@ -32,7 +32,7 @@ vision/input/serial (that's the point — it's guest-OS-agnostic).
 | `qemu-system-x86_64` | everything (`up`) | vmkit can't run |
 | `python3` (stdlib only) | QMP, mouse mapping, PNG sizing | vmkit can't run |
 | `openssh` (`ssh`/`scp`) | `ssh`, `push`, `pull`, `wait ssh`/`exec` | those commands only |
-| ImageMagick (`magick`/`convert`) | `shot --grid`, `wait screen` (fuzzy diff), old-qemu PNG fallback | grid/stable degrade; plain `shot` still works via QMP PNG |
+| ImageMagick (`magick`/`convert`) | `shot --grid`, `wait screen`/`watch` (fuzzy diff) | grid/stable degrade; plain `shot` still works (stdlib PPM→PNG) |
 | `tesseract` + a language pack (e.g. `tesseract-data-eng`) | `find` (OCR) | `find` prints a clear "not installed" message (exit 3) |
 | `qemu-system-<arch>` + UEFI firmware (e.g. `edk2-aarch64`) | non-x86 guests via `--arch`/`--accel` (validated: aarch64/TCG) | `--arch` only |
 | a VNC client (`remote-viewer`/`vinagre`/`gvncviewer`/`wlvncc`/`vncviewer`) | `view` (human live view) | `view` prints the address to connect manually |
