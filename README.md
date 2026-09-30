@@ -83,6 +83,17 @@ bin/vmkit --overlay ... snapshot clean ; bin/vmkit --overlay ... restore clean
 bin/vmkit --overlay ... down
 ```
 
+Quoting and typing:
+
+- `ssh`/`xexec` with **one** argument run it as a shell command line in the
+  guest (`ssh 'journalctl -b | tail'`). With **several** arguments each one is
+  quoted with bash's `printf %q`, so they arrive as a literal argv: shell syntax
+  (pipes, redirects, `&&`, globs, `$VAR`) must go in a single argument. `%q`
+  can emit `$'…'` quoting (for newlines, tabs, control characters), which needs
+  bash or zsh as the guest login shell; a POSIX `sh` (dash) does not parse it.
+- `type` maps US-ASCII only. If the text has a character with no key mapping,
+  it exits 1 naming the characters and types **nothing** (not a prefix).
+
 Config resolves from flags → env (`VMKIT_OVERLAY`, `VMKIT_DIR`, `VMKIT_SSH_PORT`,
 `VMKIT_VIEW`, …) → defaults. Sockets/logs/screenshots live in
 `<overlay-dir>/.vmkit` unless `--dir` is given. See the header of `bin/vmkit`
@@ -116,7 +127,9 @@ $V report                            # -> <run>/report.html
   its raw RGB goes to one ffmpeg that writes `frames/%06d.png` (file number
   = frame `n`) and `video.mkv` (ffv1). QEMU's "Display output is not active"
   placeholder is marked `inactive`. A resolution change starts a new encoder
-  segment. `stop` writes `summary.json`: fps, interval p50/p95/max,
+  segment. `video.mkv` is for watching: it plays at the nominal `--fps`, one
+  frame per capture, so a gap or a slow stretch is not shown in real time;
+  timing comes from `frames.jsonl` (`t_req`/`t` per frame). `stop` writes `summary.json`: fps, interval p50/p95/max,
   screendump call time, and `degraded=true` when any interval exceeded 50 ms
   (`--degraded-ms`) or a screendump failed: a busy host shows up in the
   numbers instead of being assumed away. A failed screendump (an error reply)
@@ -126,6 +139,9 @@ $V report                            # -> <run>/report.html
 - **Actions**: `keys`/`type`/`move`/`click`/`tap`/`tap-text`/`drag`/`scroll`
   (QMP) and `ssh`/`xexec` (subprocess) append `{t, cmd, args, t_send, t_ack,
   ok, error?, step?}` to `<dir>/actions.jsonl` and, while recording, to the run.
+  For `ssh`/`xexec`, `t_send` is taken before the ssh client starts, so
+  `t_send`..`t_ack` includes ssh connection setup (often 100 ms or more), not
+  only the command.
 - **`frames`**: `+300ms` = the first frame at or after anchor+300 ms;
   `+50ms..+300ms` = every frame in the window; an empty window or an offset
   outside the recording is an error (exit 2).
