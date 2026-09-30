@@ -120,12 +120,17 @@ NEEDS_SIZE = {"move", "tap", "tap-text", "drag"}
 
 def run_qmp(op, a, sock, tmp):
     """Perform op; returns (record fields, stdout message)."""
-    q = QMP(sock)
     try:
-        size = fb_size(q, tmp) if op in NEEDS_SIZE else None
-        A = Actor(q, size)
+        q = QMP(sock)
+    except (QMPError, OSError) as e:    # VM down: a failed action, logged like any other
+        t = now()
+        return {"t_send": t, "t_ack": t, "ok": False, "error": str(e)}, None
+    try:
+        A = Actor(q)
         rec, msg = {}, ""
         try:
+            if op in NEEDS_SIZE:
+                A.size = fb_size(q, tmp)
             if op == "move":
                 A.moveto(a[0], a[1]); rec.update(x=int(a[0]), y=int(a[1])); msg = f"move {a[0]},{a[1]}"
             elif op == "click":

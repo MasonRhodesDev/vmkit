@@ -1,7 +1,10 @@
+import io
+import json
 import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from vmkit import act
 
@@ -34,6 +37,27 @@ class ActQMP(unittest.TestCase):
         rec, _ = act.run_qmp("tap", ["100", "0"], self.sock, self.td)
         self.assertTrue(rec["ok"], rec.get("error"))
         self.assertEqual([e["data"]["value"] for e in self.events()[0]], [32767, 0])
+
+    def main_logged(self, *argv):
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            rc = act.main(["--dir", self.td, "--tmp", self.td] + list(argv))
+        with open(os.path.join(self.td, "actions.jsonl")) as f:
+            recs = [json.loads(x) for x in f]
+        return rc, err.getvalue(), recs
+
+    def test_vm_down_is_a_logged_failed_action(self):
+        rc, err, recs = self.main_logged("--sock", os.path.join(self.td, "nope.sock"), "keys", "a")
+        self.assertEqual(rc, 1)
+        self.assertIn("cannot connect", err)
+        self.assertEqual([(r["cmd"], r["ok"]) for r in recs], [("keys", False)])
+        self.assertIn("t_send", recs[0])
+
+    def test_failed_size_screendump_is_a_logged_failed_action(self):
+        self.srv.handlers["screendump"] = lambda a: {"error": {"class": "GenericError", "desc": "no surface"}}
+        rc, err, recs = self.main_logged("--sock", self.sock, "tap", "1", "2")
+        self.assertEqual(rc, 1)
+        self.assertEqual([(r["cmd"], r["ok"]) for r in recs], [("tap", False)])
+        self.assertIn("no surface", recs[0]["error"])
 
 
 if __name__ == "__main__":
