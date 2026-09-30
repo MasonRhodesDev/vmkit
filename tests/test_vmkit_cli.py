@@ -142,5 +142,38 @@ class VmkitCLI(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.dir, "record.run")))
 
 
+    # ---- scratch PPMs are removed on failure --------------------------------
+
+    def dump_then(self, reply):
+        """screendump writes a (truncated) PPM, then replies `reply`."""
+        def h(args):
+            with open(args["filename"], "wb") as f:
+                f.write(b"P6\n64 48\n255\n" + bytes(10))
+            return reply
+        self.srv.handlers["screendump"] = h
+
+    def test_shot_cleans_up_when_ppm2png_fails(self):
+        self.qmp()
+        self.dump_then({"return": {}})
+        r = self.vmkit("shot", "t")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(os.listdir(self.shm), [])
+
+    def test_shot_cleans_up_when_screendump_fails(self):
+        self.qmp()
+        self.dump_then({"error": {"class": "GenericError", "desc": "disk full"}})
+        r = self.vmkit("shot", "t")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(os.listdir(self.shm), [])
+
+    def test_find_and_tap_text_clean_up_when_tesseract_fails(self):
+        self.qmp()
+        self.fake("tesseract", "exit 1")
+        for args in (["find", "x"], ["tap-text", "x"]):
+            r = self.vmkit(*args)
+            self.assertNotEqual(r.returncode, 0, args)
+            self.assertEqual(os.listdir(self.shm), [], args)
+
+
 if __name__ == "__main__":
     unittest.main()

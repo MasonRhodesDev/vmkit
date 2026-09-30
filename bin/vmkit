@@ -277,13 +277,6 @@ dump_ppm() {  # dump_ppm <out.ppm>
         || qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s"}}' "$1")" >/dev/null
 }
 
-# framebuffer WxH from a throwaway screendump (needed to map pixels -> abs axis)
-fb_size() {
-    local tmp="$TMPD/vmkit-size.$$.ppm"
-    dump_ppm "$tmp"
-    python3 "$VMKIT_LIB/vmkit/imageio.py" size "$tmp"; rm -f "$tmp"
-}
-
 # Append a non-input command (e.g. shot) to the session transcript
 # ($DIR/actions.jsonl). Input actions are logged, with timestamps, by act.py.
 log_action() {
@@ -303,9 +296,8 @@ stamped() { local n="$1" shown="$2"; shift 2; python3 "$VMKIT_LIB/vmkit/act.py" 
 
 # OCR the current screen -> lines of "cx cy text". mode: word (default) or line.
 ocr_screen() {
-    local mode="${1:-word}" ppm="$TMPD/vmkit-ocr.$$.ppm"
-    dump_ppm "$ppm"
-    tesseract "$ppm" - tsv 2>/dev/null | awk -v mode="$mode" -F'\t' '
+    local mode="${1:-word}" ppm="$TMPD/vmkit-ocr.$$.ppm" rc=0
+    { dump_ppm "$ppm" && tesseract "$ppm" - tsv 2>/dev/null | awk -v mode="$mode" -F'\t' '
         NR>1 && $12!="" && $12!=" " {
             if (mode=="line") {
                 key=$2"-"$3"-"$4"-"$5   # page-block-par-line
@@ -314,8 +306,8 @@ ocr_screen() {
                 x1[key]=$7+$9; y1[key]=($8+$10>y1[key]?$8+$10:y1[key])
             } else { printf "%d %d\t%s\n", $7+$9/2, $8+$10/2, $12 }
         }
-        END { if (mode=="line") for (k in txt) printf "%d %d\t%s\n", (x0[k]+x1[k])/2, (y0[k]+y1[k])/2, txt[k] }'
-    rm -f "$ppm"
+        END { if (mode=="line") for (k in txt) printf "%d %d\t%s\n", (x0[k]+x1[k])/2, (y0[k]+y1[k])/2, txt[k] }'; } || rc=$?
+    rm -f "$ppm"; return "$rc"
 }
 
 case "$cmd" in
@@ -382,9 +374,9 @@ shot)
     log_action shot "$@"
     grid=""; name="shot"
     for a in "$@"; do case "$a" in --grid) grid=1;; *) name="$a";; esac; done
-    out="$DIR/${name}.png"; ppm="$TMPD/vmkit-shot.$$.ppm"
-    dump_ppm "$ppm"
-    python3 "$VMKIT_LIB/vmkit/imageio.py" ppm2png "$ppm" "$out" >/dev/null; rm -f "$ppm"
+    out="$DIR/${name}.png"; ppm="$TMPD/vmkit-shot.$$.ppm"; rc=0
+    { dump_ppm "$ppm" && python3 "$VMKIT_LIB/vmkit/imageio.py" ppm2png "$ppm" "$out" >/dev/null; } || rc=$?
+    rm -f "$ppm"; [ "$rc" -eq 0 ] || exit "$rc"
     if [ -n "$grid" ]; then out="$(grid_overlay "$out" "$DIR/${name}-grid.png")"; fi
     echo "$out"
     ;;
@@ -402,12 +394,12 @@ tap-text)
     # Uses --line grouping so multi-word labels match. Exit 1 if not found.
     command -v tesseract >/dev/null || { echo "vmkit tap-text: tesseract not installed on host" >&2; exit 3; }
     q="${1:?vmkit tap-text \"<label>\" [nth] [button]}"; nth="${2:-1}"; btn="${3:-left}"
-    ppm="$TMPD/vmkit-ocr.$$.ppm"
-    dump_ppm "$ppm"
+    ppm="$TMPD/vmkit-ocr.$$.ppm"; rc=0
     # Match the query as a consecutive run of words within one OCR line and
     # target the bbox of just those words (so adjacent buttons don't merge).
     # tesseract TSV goes to a file: a heredoc script can't also read stdin.
-    tesseract "$ppm" - tsv >"$DIR/.ocr.tsv" 2>/dev/null; rm -f "$ppm"
+    { dump_ppm "$ppm" && tesseract "$ppm" - tsv >"$DIR/.ocr.tsv" 2>/dev/null; } || rc=$?
+    rm -f "$ppm"; [ "$rc" -eq 0 ] || exit "$rc"
     target=$(python3 - "$q" "$nth" "$DIR/.ocr.tsv" <<'PY'
 import sys
 q=sys.argv[1].lower().split(); nth=int(sys.argv[2])
