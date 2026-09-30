@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import queue
 import shutil
@@ -141,6 +142,30 @@ class CaptureErrors(unittest.TestCase):
         R = self.recorder()
         self.capture(R, 3)
         self.assertIn("connection closed", R.error or "")
+
+    def summary_after(self, screendump):
+        self.srv.handlers["screendump"] = screendump
+        R = self.recorder()
+        t = threading.Thread(target=lambda: setattr(R, "rc", R.main()), daemon=True)
+        t.start(); t.join(5)
+        R.stop.set(); t.join(5)
+        self.assertFalse(t.is_alive(), "recorder did not stop")
+        self.assertEqual(R.rc, 1)
+        with open(os.path.join(self.run, "summary.json")) as f:
+            return json.load(f)
+
+    def test_summary_written_on_a_bad_ppm(self):
+        def garbage(args):
+            with open(args["filename"], "wb") as f:
+                f.write(b"GIF89a not a ppm")
+            return {"return": {}}
+        S = self.summary_after(garbage)
+        self.assertIn("not a binary PPM", S["error"])
+        self.assertTrue(S["degraded"])
+
+    def test_summary_written_when_the_ppm_is_missing(self):
+        S = self.summary_after(lambda args: {"return": {}})    # replies ok, writes nothing
+        self.assertIn("No such file", S["error"])
 
     def test_default_qmp_timeout_outlasts_savevm_loadvm(self):
         with mock.patch.object(record, "Recorder") as Rec, mock.patch("signal.signal"):

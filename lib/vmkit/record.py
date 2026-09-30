@@ -321,7 +321,10 @@ class Recorder:
     def main(self):
         wt = threading.Thread(target=self.writer, name="encoder", daemon=True)
         wt.start()
-        self.capture()
+        try:
+            self.capture()
+        except Exception as e:   # bad PPM header, shm unreadable, ...: still write summary.json
+            self.fail(f"capture: {type(e).__name__}: {e}")
         n = len(self.ts)
         self.q.put(None)
         wt.join()
