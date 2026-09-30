@@ -457,9 +457,13 @@ type)
     ;;
 record)
     sub="${1:-status}"; shift || true
+    # pid_running: exists and is not a zombie (a dead child of this shell).
+    pid_running() { kill -0 "$1" 2>/dev/null && [ "$(awk '{print $3}' "/proc/$1/stat" 2>/dev/null)" != Z ]; }
+    # rec_alive (stop/status, possibly long after start): also require the
+    # cmdline to name the recorder, so a reused pid is not signalled.
     # (no `| grep -q`: under pipefail its early exit SIGPIPEs the reader)
-    rec_alive() { local p c; p=$(cat "$REC_PID" 2>/dev/null) && [ -n "$p" ] && kill -0 "$p" 2>/dev/null \
-        && c=$(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null) && [[ "$c" == *vmkit-record* ]]; }
+    rec_alive() { local p c; p=$(cat "$REC_PID" 2>/dev/null) && [ -n "$p" ] && pid_running "$p" || return 1
+        c=$(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null); [[ "$c" == *vmkit-record* ]]; }
     case "$sub" in
     start)
         # record start [--fps N] [--out RUNDIR] [--degraded-ms MS]
@@ -477,10 +481,13 @@ record)
         # would block a caller reading it (same footgun as `up`).
         setsid "${prio[@]}" python3 "$(dirname "$VMKIT_LIB")/bin/vmkit-record" --sock "$QMP_REC_SOCK" \
             --run "$out" --fps "$fps" --degraded-ms "$dms" >>"$out/recorder.out" 2>&1 </dev/null &
-        echo $! >"$REC_PID"; echo "$out" >"$REC_RUN"
-        # Block until the first frame is stamped, so actions after this are covered.
+        rp=$!; echo "$rp" >"$REC_PID"; echo "$out" >"$REC_RUN"
+        # Block until the first frame is stamped, so actions after this are
+        # covered. Liveness here is pid-only: $rp is our own child, and until
+        # its exec chain (setsid, nice, ionice, python3) completes its cmdline
+        # is still this script's (or empty), which rec_alive would reject.
         i=0; while ! [ -s "$out/frames.jsonl" ]; do
-            if ! rec_alive; then rm -f "$REC_PID" "$REC_RUN"
+            if ! pid_running "$rp"; then rm -f "$REC_PID" "$REC_RUN"
                 echo "vmkit record: recorder exited; see $out/recorder.log $out/recorder.out" >&2
                 tail -3 "$out/recorder.log" "$out/recorder.out" >&2 2>/dev/null; exit 1; fi
             [ "$i" -ge 100 ] && { echo "vmkit record: no frame after 10 s" >&2; exit 1; }
