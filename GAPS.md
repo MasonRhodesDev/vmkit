@@ -134,3 +134,6 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
   pidfile on exit), waits for that pid to exit (`VMKIT_DOWN_TIMEOUT`, default
   60 s), then SIGTERM, then SIGKILL; it only signals a pid whose cmdline still
   names qemu.
+- **No session-side wait** — `wait exec` runs over plain ssh, without the
+  graphical session's env. New: `wait xexec CMD [timeout]` polls CMD through the
+  same env resolver as `xexec` (e.g. `wait xexec 'hyprctl clients | grep -q foot'`).

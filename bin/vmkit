@@ -53,8 +53,9 @@
 #   scroll up|down [n]       wheel scroll n notches
 #   keys K [K...]            send QMP qcodes (e.g. ret esc tab shift-1 ctrl-alt-f2)
 #   type TEXT                type an ASCII string
-#   wait ssh|exec|serial|screen [args] [timeout]
+#   wait ssh|exec|xexec|serial|screen [args] [timeout]
 #                            block until: ssh reachable | a guest cmd exits 0 |
+#                            a cmd in the graphical session exits 0 |
 #                            the serial log matches a regex | the frame is stable
 #   push LOCAL GUEST-DEST    scp + sudo-install a file into the guest
 #   pull GUEST-PATH LOCAL    copy a file out of the guest
@@ -195,6 +196,11 @@ guest_ssh() { ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" -i "$SSH_KEY" "$SSH_USER@127.0
 # argv and each is quoted with printf %q (`ssh printf '%s\n' 'a b'`).
 remote_cmd() {
     if [ $# -eq 1 ]; then printf '%s' "$1"; else printf '%q ' "$@"; fi
+}
+# Run in the guest's graphical (systemd --user) session: a single-quoted
+# env-resolver prefix + the caller's command (see remote_cmd).
+guest_xexec() {
+    guest_ssh 'export XDG_RUNTIME_DIR=/run/user/$(id -u); eval "$(systemctl --user show-environment 2>/dev/null | grep -E "^(WAYLAND_DISPLAY|DISPLAY|HYPRLAND_INSTANCE_SIGNATURE|DBUS_SESSION_BUS_ADDRESS|XDG_CURRENT_DESKTOP)=" | sed "s/^/export /")"; '"$(remote_cmd "$@")"
 }
 guest_scp() { scp "${SSH_OPTS[@]}" -P "$SSH_PORT" -i "$SSH_KEY" "$@"; }
 
@@ -531,6 +537,9 @@ wait)
         exec)  cmd="${1:?vmkit wait exec \"<cmd>\"}"; to="${2:-120}"
                poll "$to" 3 guest_ssh "$cmd" \
                    && echo "condition met" || { echo "timed out ($to s): $cmd" >&2; exit 1; };;
+        xexec) cmd="${1:?vmkit wait xexec \"<cmd>\"}"; to="${2:-120}"   # polled in the graphical session
+               poll "$to" 2 guest_xexec "$cmd" \
+                   && echo "condition met" || { echo "timed out ($to s): $cmd" >&2; exit 1; };;
         serial) re="${1:?vmkit wait serial <regex>}"; to="${2:-120}"
                poll "$to" 2 grep -Eq "$re" "$SERIAL_LOG" \
                    && echo "serial matched: $re" || { echo "timed out ($to s): serial !~ $re" >&2; exit 1; };;
@@ -552,7 +561,7 @@ wait)
                    prev="$cur"; sleep 1 2>/dev/null || :; waited=$((waited+1))
                done
                echo "timed out ($to s) waiting for a stable frame" >&2; exit 1;;
-        *) echo "usage: vmkit wait {ssh|exec <cmd>|serial <regex>|screen} [timeout]" >&2; exit 2;;
+        *) echo "usage: vmkit wait {ssh|exec <cmd>|xexec <cmd>|serial <regex>|screen} [timeout]" >&2; exit 2;;
     esac
     ;;
 push)  # push <local> <guest-dest> — scp then sudo-install (dest may be root-owned)
@@ -570,9 +579,7 @@ xexec)  # run a command inside the guest's graphical (systemd --user) session,
         # resolving XDG_RUNTIME_DIR + WAYLAND_DISPLAY/DISPLAY/etc. so GUI apps
         # launch on the desktop without hand-set env. Generic for Linux guests.
     [ $# -gt 0 ] || { echo "usage: vmkit xexec <cmd...>" >&2; exit 2; }
-    # ssh concatenates args into one remote command string, so build it: a
-    # single-quoted env-resolver prefix + the caller's command (see remote_cmd).
-    guest_ssh 'export XDG_RUNTIME_DIR=/run/user/$(id -u); eval "$(systemctl --user show-environment 2>/dev/null | grep -E "^(WAYLAND_DISPLAY|DISPLAY|HYPRLAND_INSTANCE_SIGNATURE|DBUS_SESSION_BUS_ADDRESS|XDG_CURRENT_DESKTOP)=" | sed "s/^/export /")"; '"$(remote_cmd "$@")"
+    guest_xexec "$@"
     ;;
 watch)  # emit a line whenever the screen changes beyond VMKIT_STABLE_PX, until
         # timeout. Pairs with the harness Monitor for motion-aware waiting.
