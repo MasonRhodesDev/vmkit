@@ -115,7 +115,7 @@ class Actor:
         self._cmd("send-key", {"keys": [{"type": "qcode", "data": k} for k in keys]})
 
 
-NEEDS_SIZE = {"move", "tap", "drag"}
+NEEDS_SIZE = {"move", "tap", "tap-text", "drag"}
 
 
 def run_qmp(op, a, sock, tmp):
