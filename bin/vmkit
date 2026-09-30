@@ -148,6 +148,8 @@ set -- "${args[@]}"
 cmd="${1:-status}"; shift || true
 
 [ -n "$DIR" ] || { [ -n "$OVERLAY" ] && DIR="$(dirname "$OVERLAY")/.vmkit" || DIR="$PWD/.vmkit"; }
+# One canonical spelling, so `up` and `down` agree on -pidfile (d, ./d, /abs/d).
+DIR="$(realpath -m "$DIR")"
 mkdir -p "$DIR"
 QMP_SOCK="$DIR/qmp.sock"; QMP_REC_SOCK="$DIR/qmp-rec.sock"; SERIAL_LOG="$DIR/serial.log"; PIDFILE="$DIR/qemu.pid"
 KNOWN="$DIR/known_hosts"; VNCFILE="$DIR/vnc"

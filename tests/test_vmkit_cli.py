@@ -42,12 +42,12 @@ class VmkitCLI(unittest.TestCase):
         os.chmod(p, 0o755)
         return p
 
-    def vmkit(self, *args, env=None, timeout=60):
+    def vmkit(self, *args, env=None, timeout=60, dir=None, cwd=None):
         e = dict(os.environ, PATH=self.fakebin + os.pathsep + os.environ["PATH"],
                  VMKIT_TMP=self.shm, VMKIT_IONICE="none", PYTHONDONTWRITEBYTECODE="1")
         e.update(env or {})
-        return subprocess.run([VMKIT, "--dir", self.dir] + list(args), capture_output=True, text=True,
-                              env=e, timeout=timeout)
+        return subprocess.run([VMKIT, "--dir", dir or self.dir] + list(args), capture_output=True, text=True,
+                              env=e, timeout=timeout, cwd=cwd)
 
     def fail_first_dumps(self, n):
         """screendump returns a QMP error for the first n calls, then works."""
@@ -257,6 +257,14 @@ class VmkitCLI(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(q.wait(5), -9)
         self.assertFalse(os.path.exists(pidfile), "pidfile left after SIGKILL")
+
+    def test_down_matches_the_pidfile_however_dir_is_spelled(self):
+        pidfile = os.path.join(self.dir, "qemu.pid")         # `up` ran with an absolute --dir
+        q = self.fake_qemu(pidfile, ignore_term=True)
+        self.write_pidfile(q.pid)
+        r = self.vmkit("down", env={"VMKIT_DOWN_TIMEOUT": "1"}, timeout=40, dir="./d", cwd=self.td)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(q.wait(5), -9, "qemu not force-killed: pidfile path spelled differently")
 
     def test_down_without_pidfile_waits_on_qmp(self):
         srv = self.qmp()
