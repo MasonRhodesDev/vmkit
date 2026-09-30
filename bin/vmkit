@@ -291,6 +291,17 @@ dump_ppm() {  # dump_ppm <out.ppm>
         || qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s"}}' "$1")" >/dev/null
 }
 
+# frame_diff <prev.ppm> <cur.ppm>: pixels that differ (magick compare -fuzz 4%;
+# it exits 1 when they differ, 2 on error: not fatal here). Prints "size" when
+# the resolutions differ (IM 7.1.2 compares two sizes as "0 (0)", exit 0, so
+# the PPM headers are compared first) and "error" when compare prints no number.
+frame_diff() {
+    [ "$(head -n 2 "$1")" = "$(head -n 2 "$2")" ] || { echo size; return 0; }
+    local d
+    d=$( { magick compare -metric AE -fuzz 4% "$1" "$2" null: 2>&1 || true; } | awk 'NR==1 && $1 ~ /^[0-9.e+]+$/ {print int($1)}')
+    echo "${d:-error}"
+}
+
 # Append a non-input command (e.g. shot) to the session transcript
 # ($DIR/actions.jsonl). Input actions are logged, with timestamps, by act.py.
 log_action() {
@@ -586,8 +597,7 @@ wait)
                # "Stable" = successive frames differ by fewer than THRESH pixels,
                # so a ticking clock (a few hundred px) doesn't defeat it but a
                # window opening/closing (many thousands) does. Needs magick.
-               # (compare exits 1 when the images differ, 2 on error: not fatal
-               # here; a non-numeric reply falls back to the default below.)
+               # A resolution change or a compare error is never stable.
                command -v magick >/dev/null || { echo "vmkit wait screen needs magick" >&2; exit 3; }
                stable=0; waited=0; prev=""
                trap 'rm -f "$TMPD"/vmkit-st.$$.*.ppm' EXIT
@@ -597,8 +607,8 @@ wait)
                        rm -f "$cur"; prev=""; stable=0; sleep 1 2>/dev/null || :; waited=$((waited+1)); continue
                    fi
                    if [ -n "$prev" ]; then
-                       d=$( { magick compare -metric AE -fuzz 4% "$prev" "$cur" null: 2>&1 || true; } | awk 'NR==1 && $1 ~ /^[0-9.e+]+$/ {print int($1)}'); d="${d:-999999}"
-                       if [ "$d" -lt "$thresh" ]; then stable=$((stable+1)); else stable=0; fi
+                       d=$(frame_diff "$prev" "$cur")
+                       if [[ "$d" =~ ^[0-9]+$ ]] && [ "$d" -lt "$thresh" ]; then stable=$((stable+1)); else stable=0; fi
                        [ "$stable" -ge "$want" ] && { echo "screen stable (last diff ${d}px)"; exit 0; }
                    fi
                    prev="$cur"; sleep 1 2>/dev/null || :; waited=$((waited+1))
@@ -635,8 +645,13 @@ watch)  # emit a line whenever the screen changes beyond VMKIT_STABLE_PX, until
             rm -f "$cur"; prev=""; sleep 1 2>/dev/null || :; waited=$((waited+1)); continue
         fi
         if [ -n "$prev" ]; then
-            d=$( { magick compare -metric AE -fuzz 4% "$prev" "$cur" null: 2>&1 || true; } | awk 'NR==1 && $1 ~ /^[0-9.e+]+$/ {print int($1)}'); d="${d:-0}"
-            [ "$d" -ge "$thresh" ] && echo "$(date -u +%H:%M:%SZ 2>/dev/null) changed ${d}px"
+            d=$(frame_diff "$prev" "$cur"); what=""
+            case "$d" in
+                size)  what="changed (resolution)";;
+                error) what="changed (compare failed)";;
+                *)     [ "$d" -ge "$thresh" ] && what="changed ${d}px";;
+            esac
+            [ -n "$what" ] && echo "$(date -u +%H:%M:%SZ 2>/dev/null) $what"
         fi
         prev="$cur"; sleep 1 2>/dev/null || :; waited=$((waited+1))
     done

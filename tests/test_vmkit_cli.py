@@ -104,6 +104,48 @@ class VmkitCLI(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("changed 3072px", r.stdout)
 
+    def sizes(self, seq):
+        """screendump serves frames of these sizes in turn, cycling."""
+        seq = list(seq); i = {"n": 0}
+
+        def h(args):
+            self.srv.size = seq[i["n"] % len(seq)]; i["n"] += 1
+            return self.srv.screendump(args)
+        self.srv.handlers["screendump"] = h
+
+    # On IM 7.1.2 `compare -metric AE` of two sizes prints "0 (0)" and exits 0,
+    # so a resolution change must be caught by comparing the dimensions.
+    def test_watch_resolution_change_is_a_change(self):
+        self.qmp()
+        self.sizes([(64, 48), (32, 24)])
+        self.fake("magick", 'echo "0 (0)" >&2; exit 0')
+        r = self.vmkit("watch", "3")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("changed", r.stdout)
+
+    def test_watch_compare_error_is_a_change(self):
+        self.qmp()
+        self.fake("magick", 'echo "magick: image widths or heights differ" >&2; exit 2')
+        r = self.vmkit("watch", "3")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("changed", r.stdout)
+
+    def test_wait_screen_resolution_change_is_not_stable(self):
+        self.qmp()
+        self.sizes([(64, 48), (32, 24)])
+        self.fake("magick", 'echo "0 (0)" >&2; exit 0')
+        r = self.vmkit("wait", "screen", "4", "2")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertNotIn("stable", r.stdout)
+
+    @unittest.skipUnless(HAVE_MAGICK, "needs ImageMagick")
+    def test_watch_resolution_change_real_magick(self):
+        self.qmp()
+        self.sizes([(64, 48), (32, 24)])
+        r = self.vmkit("watch", "3")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("changed", r.stdout)
+
     @unittest.skipUnless(HAVE_MAGICK, "needs ImageMagick")
     def test_wait_screen_and_watch_real_magick(self):
         self.qmp()
