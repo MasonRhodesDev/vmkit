@@ -130,6 +130,36 @@ class CaptureErrors(unittest.TestCase):
         self.assertEqual(S["screendump_errors"], 1)
         self.assertTrue(S["degraded"])
 
+    def gaps(self):
+        with open(os.path.join(self.run, "gaps.jsonl")) as f:
+            return [json.loads(x) for x in f]
+
+    def frames(self):
+        with open(os.path.join(self.run, "frames.jsonl")) as f:
+            return [json.loads(x) for x in f]
+
+    def test_error_ticks_are_recorded_as_one_gap(self):
+        self.dumps(lambda i: i in (3, 4, 5))
+        R = self.recorder()
+        self.capture(R, 0.5)
+        G, F = self.gaps(), self.frames()
+        self.assertEqual(len(G), 1, G)
+        g = G[0]
+        self.assertEqual(g["errors"], 3)
+        self.assertIn("no surface", g["reason"])
+        self.assertLess(F[1]["t"], g["t_from"])          # after frame 1's reply ...
+        self.assertLessEqual(g["t_to"], F[2]["t_req"])   # ... up to frame 2's request
+        self.assertEqual([f["n"] for f in F], list(range(len(F))))   # n is not consumed
+
+    def test_a_gap_open_at_stop_is_recorded(self):
+        self.dumps(lambda i: i > 2)
+        R = self.recorder()
+        self.capture(R, 0.3)
+        G, F = self.gaps(), self.frames()
+        self.assertEqual(len(G), 1, G)
+        self.assertLess(F[-1]["t"], G[0]["t_from"])
+        self.assertLess(G[0]["t_from"], G[0]["t_to"])
+
     def test_gives_up_after_consecutive_errors(self):
         self.dumps(lambda i: i > 2)
         R = self.recorder(max_errors=5)

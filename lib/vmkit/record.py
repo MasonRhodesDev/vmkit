@@ -22,6 +22,9 @@ How it works (numbers from the 2026-09-30 recording spike):
 
 Outputs in the run dir:
   frames.jsonl    {"n", "t_req", "t", "inactive"} per frame (ns, CLOCK_MONOTONIC)
+  gaps.jsonl      {"t_from", "t_to", "errors", "reason"} per run of screendump
+                  errors: no frame exists for [t_from, t_to] (t_from = the first
+                  failed request, t_to = the next successful one, or the stop)
   segments.jsonl  {"seg", "first_n", "w", "h", "video"} per encoder segment
   summary.json    fps, interval p50/p95/max, screendump call times, degraded, ...
   recorder.log    gaps over the degraded threshold, errors
@@ -197,6 +200,12 @@ class Recorder:
             return None if self.stop.is_set() else self.fail(f"qmp: {e}")
         frames = open(os.path.join(self.run, "frames.jsonl"), "a", buffering=1)
         n = 0; t_next = now(); prev_t = None; was_inactive = False; consec = 0
+        gap = None      # the open run of errors: {"t_from", "errors", "reason"}
+
+        def end_gap(t_to):
+            with open(os.path.join(self.run, "gaps.jsonl"), "a") as g:
+                g.write(json.dumps({"t_from": gap["t_from"], "t_to": t_to, "errors": gap["errors"],
+                                    "reason": gap["reason"]}) + "\n")
         try:
             while not self.stop.is_set():
                 t_req = now()
@@ -210,6 +219,8 @@ class Recorder:
                     if self.stop.is_set():
                         break
                     self.errors += 1; consec += 1
+                    gap = gap or {"t_from": t_req, "errors": 0}
+                    gap["errors"] += 1; gap["reason"] = f"screendump error: {e}"
                     self.log(f"gap n={n} screendump error ({consec} in a row): {e}")
                     if consec >= a.max_errors:
                         self.fail(f"screendump: {consec} errors in a row, last: {e}")
@@ -222,6 +233,8 @@ class Recorder:
                         self.fail(f"screendump: {e}")
                     break
                 consec = 0
+                if gap:
+                    end_gap(t_req); gap = None
                 t = now()
                 try:
                     with open(shm, "rb") as f:
@@ -266,6 +279,8 @@ class Recorder:
                 elif late < 0:
                     self.stop.wait(-late / 1e9)
         finally:
+            if gap:
+                end_gap(now())
             frames.close()
             qmp.close()
             try:
