@@ -8,7 +8,8 @@ One check on explicit frames:
 
 The same, with frames chosen from a recording by the Timing rules (instead of --frame):
   ... [--run RUN] (--at T_NS | --action N|STEP [--anchor send|ack]) --offset SPEC [--mode any|all]
-  (`changed` then uses the last frame before the anchor as its baseline.)
+  (`changed` then uses the last frame before the anchor as its baseline. A window
+  defaults to --mode any, or to all with --not: "in no frame of the window".)
 
 Any check: --not. Prints a JSON result; exit 0 pass, 1 fail, 2 error.
 
@@ -61,7 +62,8 @@ def evaluate(run, frames, actions, exp, base_dir="."):
                 raise T.TimelineError(f"the action failed: {act.get('error')}")
         out["anchor_t"] = anchor
         is_window = T.parse_at(at)[0] == "window"
-        mode = exp.get("mode", "any" if is_window else "all")
+        # schema v0.3: `not` on a window means "in no frame", so it defaults to all
+        mode = exp.get("mode", "any" if is_window and not exp.get("not") else "all")
         out["mode"] = mode
         sel = T.select(frames, anchor, at)
         base = None

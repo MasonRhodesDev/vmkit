@@ -289,6 +289,16 @@ class Evaluate(Tmp):
         r = self.ev(check="pixel", at="+0ms..+100ms", mode="all", region=[20, 20, 10, 10], color="#00b4ff")
         self.assertEqual(r["status"], "fail")
 
+    def test_not_on_window_defaults_to_all(self):
+        # schema v0.3: not on a window = "in no frame of the window"
+        box = dict(check="pixel", at="+0ms..+100ms", region=[20, 20, 10, 10], color="#00b4ff")
+        r = self.ev(**box, **{"not": True})
+        self.assertEqual((r["mode"], r["status"]), ("all", "fail"))    # the box is in frames 4, 5
+        r = self.ev(**box, mode="any", **{"not": True})                  # explicit any: some frame lacks it
+        self.assertEqual((r["mode"], r["status"]), ("any", "pass"))
+        r = self.ev(**dict(box, at="+100ms..+140ms"), **{"not": True})  # frame 6 only: no box
+        self.assertEqual(r["status"], "pass")
+
     def test_point_before_action_as_baseline_check(self):
         r = self.ev(check="pixel", at="-50ms", region=[20, 20, 10, 10], color="#00b4ff", **{"not": True})
         self.assertEqual(r["status"], "pass")

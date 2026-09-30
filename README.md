@@ -128,7 +128,9 @@ $V report                            # -> <run>/report.html
   outside the recording is an error (exit 2).
 - **`check`** (`lib/vmkit/checks.py`): `pixel`, `ocr`, `template`, `changed`,
   regions `[x,y,w,h]` with negative x/y from the right/bottom and 0 w/h to the
-  edge, `--not` on any check; inactive frames are errors.
+  edge, `--not` on any check; inactive frames are errors. A window passes when
+  any frame passes (`--mode any`), or with `--not` when no frame matches
+  (`--mode all`), unless `--mode` is given.
 - **`report`**: plain HTML, no external assets: pass/fail summary, recorder
   numbers and the degraded flag, per-action contact sheets with check regions
   outlined, links to the video.
