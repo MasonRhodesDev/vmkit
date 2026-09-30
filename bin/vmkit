@@ -61,8 +61,10 @@
 #   serial [N]               print last N lines of the serial/console log (default 60)
 #   ssh [CMD...]             ssh into the guest (interactive if no CMD)
 #   qmp JSON                 raw QMP command object; prints the JSON reply
-#   snapshot NAME            qcow2 internal snapshot (savevm) via QMP
-#   restore NAME             load a snapshot (loadvm) via QMP
+#   hmp LINE                 HMP command via human-monitor-command; prints its text
+#   snapshot NAME            qcow2 internal snapshot (HMP savevm)
+#   restore NAME             load a snapshot (HMP loadvm; needs the same devices)
+#   snapshots                list snapshots (HMP info snapshots)
 #   down                     graceful powerdown, then kill by pidfile if needed
 #
 # vmkit never uses `pkill -f` (its pattern would match the caller's own shell);
@@ -138,6 +140,26 @@ while True:
             e = o["error"]
             sys.exit(f"vmkit: qmp error: {e.get('class','')}: {e.get('desc','')}")
         break
+PY
+}
+
+# HMP through QMP's human-monitor-command (savevm/loadvm/info are HMP-only on
+# modern QEMU). HMP reports failures as text inside "return", not as a QMP
+# error, so: hmp <line> [strict]. Prints the text. Exits 1 on a QMP error, on
+# text starting "Error", or (strict=1, for savevm/loadvm, which print nothing
+# on success) on any output at all.
+hmp() {
+    local line="$1" strict="${2:-0}" req out
+    req=$(python3 -c 'import json,sys; print(json.dumps({"execute":"human-monitor-command","arguments":{"command-line":sys.argv[1]}}))' "$line")
+    out=$(qmp "$req") || return 1
+    python3 - "$out" "$strict" "$line" <<'PY'
+import json, sys
+o = json.loads(sys.argv[1]); strict = sys.argv[2] == "1"
+txt = o.get("return", "")
+txt = txt if isinstance(txt, str) else ""
+if (strict and txt.strip()) or txt.lstrip().lower().startswith("error"):
+    sys.exit(f"vmkit: hmp {sys.argv[3]!r} failed: {txt.strip()}")
+sys.stdout.write(txt)
 PY
 }
 
@@ -560,8 +582,14 @@ image)  # image pull <url> [dest] — fetch a base cloud image
 serial) tail -n "${1:-60}" "$SERIAL_LOG" ;;
 ssh)    guest_ssh "$@" ;;
 qmp)    qmp "$1" ;;
-snapshot) qmp "$(printf '{"execute":"savevm","arguments":{"name":"%s"}}' "${1:?name}")" ;;
-restore)  qmp "$(printf '{"execute":"loadvm","arguments":{"name":"%s"}}' "${1:?name}")" ;;
+hmp)    hmp "$*" ;;
+snapshots) hmp "info snapshots" ;;
+# savevm/loadvm write/read the whole RAM image and can outlast the 30 s default
+# socket timeout, so they get VMKIT_SNAPSHOT_TIMEOUT (default 600 s).
+snapshot) n="${1:?vmkit snapshot NAME}"
+          VMKIT_QMP_TIMEOUT="${VMKIT_SNAPSHOT_TIMEOUT:-600}" hmp "savevm $n" 1 && echo "snapshot $n saved" ;;
+restore)  n="${1:?vmkit restore NAME}"
+          VMKIT_QMP_TIMEOUT="${VMKIT_SNAPSHOT_TIMEOUT:-600}" hmp "loadvm $n" 1 && echo "restored $n" ;;
 down)
     [ -S "$QMP_SOCK" ] && qmp '{"execute":"system_powerdown"}' >/dev/null 2>&1 || true
     for _ in $(seq 1 20); do ss -ltn 2>/dev/null | grep -q ":$SSH_PORT " || break; guest_ssh true 2>/dev/null || true; done

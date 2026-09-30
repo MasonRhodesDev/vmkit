@@ -112,3 +112,8 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
   long-lived recorder holding `qmp.sock` blocked every other vmkit call for
   seconds. Fixed: `up` adds a second socket, `$DIR/qmp-rec.sock`, used only by
   the recorder.
+- **`snapshot`/`restore` sent savevm/loadvm as QMP** (HMP-only on modern QEMU,
+  see 2026-08-23). Fixed: both go through `human-monitor-command`; HMP returns
+  errors as text in `"return"`, so any output from savevm/loadvm (or text
+  starting "Error") is a nonzero exit. Their socket timeout is
+  `VMKIT_SNAPSHOT_TIMEOUT` (default 600 s). New: `hmp LINE`, `snapshots`.

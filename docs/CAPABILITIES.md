@@ -9,7 +9,8 @@ QEMU layer, so it holds for any guest OS.
   if the VM already answers QMP.
 - `status` — QMP socket, SSH reachability, run-state, guest uname.
 - `down` — QMP `system_powerdown`; if the guest doesn't stop, kill by pidfile.
-- `snapshot NAME` / `restore NAME` — qcow2 internal `savevm`/`loadvm`.
+- `snapshot NAME` / `restore NAME` — qcow2 internal `savevm`/`loadvm` (HMP via
+  `human-monitor-command`; HMP error text is a nonzero exit). `snapshots` lists them.
 
 ## Vision (agent) + shared view (human)
 - `shot [name]` — screendump to `<dir>/<name>.png`; prints the path. Read that
