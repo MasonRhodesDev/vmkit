@@ -188,6 +188,30 @@ class VmkitCLI(unittest.TestCase):
         self.assertEqual([(x["cmd"], x["args"]) for x in recs], [("shot", name)])
         self.assertRegex(recs[0]["t"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
+    # ---- up ------------------------------------------------------------------
+
+    def up(self, env):
+        """`vmkit up` with a fake qemu-system-x86_64 that saves its argv; returns that argv."""
+        argv = os.path.join(self.td, "qemu.argv")
+        self.fake("qemu-system-x86_64", f'for a in "$@"; do printf "%s\\0" "$a"; done >{argv}.tmp; mv {argv}.tmp {argv}')
+        disk = os.path.join(self.td, "disk.qcow2")
+        open(disk, "w").close()
+        r = self.vmkit("--overlay", disk, "up", env=env)
+        for _ in range(50):
+            if os.path.exists(argv):
+                break
+            time.sleep(0.1)
+        else:
+            self.fail("qemu never started: " + r.stdout + r.stderr)
+        with open(argv) as f:
+            return r, f.read().split("\0")[:-1]
+
+    def test_up_drops_ionice_when_denied(self):
+        self.fake("ionice", 'echo "ionice: ioprio_set failed: Operation not permitted" >&2; exit 1')
+        r, argv = self.up({"VMKIT_IONICE": "1"})
+        self.assertIn("ionice", r.stderr)
+        self.assertIn("-pidfile", argv)
+
     # ---- down ----------------------------------------------------------------
 
     def fake_qemu(self, pidfile, ignore_term=False):

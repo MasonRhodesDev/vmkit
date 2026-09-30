@@ -200,9 +200,15 @@ sys.stdout.write(txt)
 PY
 }
 
-# Priority prefix for long-lived host processes (qemu, recorder).
+# Priority prefix for long-lived host processes (qemu, recorder). ionice is
+# probed first (called by up/record start only): a class can be denied, e.g.
+# -c1 without CAP_SYS_ADMIN, and a failing ionice would never exec qemu.
 prio=(nice -n "$NICE")
-if [ "$IONICE" != none ] && command -v ionice >/dev/null; then prio+=(ionice -c "$IONICE"); fi
+add_ionice() {
+    [ "$IONICE" != none ] && command -v ionice >/dev/null || return 0
+    if ionice -c "$IONICE" true 2>/dev/null; then prio+=(ionice -c "$IONICE")
+    else echo "vmkit: ionice -c $IONICE is not permitted here; running without ionice" >&2; fi
+}
 
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN"
           -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3
@@ -346,6 +352,7 @@ up)
             else echo "vmkit: no aarch64 UEFI firmware found (install edk2-aarch64/AAVMF)" >&2; exit 3; fi ;;
         *) machine=virt ;;
     esac
+    add_ionice
     echo "== vmkit up: $(basename "$OVERLAY")  arch=$ARCH accel=$ACCEL  view=$VIEW  serial=$SERIAL_LOG  qmp=$QMP_SOCK  ssh=$SSH_PORT$([ -f "$VNCFILE" ] && echo "  vnc=127.0.0.1:$(cat "$VNCFILE")")"
     "${prio[@]}" "qemu-system-$ARCH" \
         -name "vmkit-$(basename "$OVERLAY" .qcow2)" \
@@ -472,6 +479,7 @@ record)
         [ -e "$out/frames.jsonl" ] && { echo "vmkit record: $out already has a recording" >&2; exit 1; }
         # Own session + stdio to a file: a backgrounded child holding our stdout
         # would block a caller reading it (same footgun as `up`).
+        add_ionice
         setsid "${prio[@]}" python3 "$(dirname "$VMKIT_LIB")/bin/vmkit-record" --sock "$QMP_REC_SOCK" \
             --run "$out" --fps "$fps" --degraded-ms "$dms" >>"$out/recorder.out" 2>&1 </dev/null &
         rp=$!; echo "$rp" >"$REC_PID"; echo "$out" >"$REC_RUN"
