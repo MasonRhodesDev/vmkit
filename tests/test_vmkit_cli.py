@@ -200,7 +200,7 @@ class VmkitCLI(unittest.TestCase):
     def test_record_stop_kills_a_recorder_that_ignores_term(self):
         self.srv = FakeQMP(os.path.join(self.dir, "qmp-rec.sock"))
         # an encoder that never reads: the pipe and the queue fill, and the
-        # recorder can no longer act on SIGTERM
+        # recorder is still waiting out its drain (10 s) when the 2 s escalation hits
         self.fake("ffmpeg", "exec sleep 300")
         run = os.path.join(self.td, "run")
         r = self.vmkit("record", "start", "--out", run)

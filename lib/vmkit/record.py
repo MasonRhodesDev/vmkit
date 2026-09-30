@@ -39,7 +39,10 @@ so a snapshot/restore during a recording is a long gap, not the end).
 
 Stop with SIGTERM or SIGINT: the recorder drains the queue, closes ffmpeg,
 checks that PNG count == frames.jsonl lines == video packets, and writes
-summary.json. Exit status 0 = clean, 1 = the recording hit an error.
+summary.json. Exit status 0 = clean, 1 = the recording hit an error. An
+encoder that has not drained --drain-s (10) s after the stop is killed, and
+summary.json says encoder_stalled=true, degraded=true (exit 1); that is well
+inside record stop's own escalation below, so the recorder still writes it.
 `vmkit record stop` SIGKILLs a recorder that outlasts VMKIT_REC_STOP_TIMEOUT
 (30 s), with its ffmpeg, and then runs `vmkit-record --run RUN --mark-killed WHY`: the
 summary.json it writes (or amends) says killed=true, degraded=true, and the
@@ -140,14 +143,20 @@ class Encoder:
     def close(self):
         if self.proc is None:
             return
-        p, self.proc = self.proc, None
+        p = self.proc      # kept until it has exited, so kill() can reach a stalled one
         try:
             p.stdin.close()
         except BrokenPipeError:
             pass
         rc = p.wait()
+        self.proc = None
         if rc != 0:
             raise RuntimeError(f"ffmpeg exited {rc} (see ffmpeg.log)")
+
+    def kill(self):
+        p = self.proc
+        if p is not None:
+            p.kill()
 
 
 class Recorder:
@@ -161,6 +170,7 @@ class Recorder:
         self.enc = Encoder(self.run, a.fps, a.ffmpeg, self.log)
         self.ts = []; self.calls = []; self.inactive = 0; self.errors = 0
         self.put_wait_ns = 0; self.max_q = 0
+        self.stalled = False; self.drain_by = None
 
     def log(self, msg):
         self.logf.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
@@ -170,6 +180,12 @@ class Recorder:
             self.error = msg
             self.log("ERROR " + msg)
         self.stop.set()
+
+    def drain_left(self):
+        """Seconds left for the encoder to drain, counted from the first time it is asked after stop."""
+        if self.drain_by is None:
+            self.drain_by = time.monotonic() + self.a.drain_s
+        return max(0.0, self.drain_by - time.monotonic())
 
     def writer(self):
         try:
@@ -267,9 +283,12 @@ class Recorder:
                     except queue.Full:
                         if self.error:
                             break
+                        if self.stop.is_set() and not self.drain_left():
+                            self.stalled = True
+                            break
                 self.put_wait_ns += now() - tp
                 self.max_q = max(self.max_q, self.q.qsize())
-                if self.error:
+                if self.error or self.stalled:
                     break
                 n += 1
                 # absolute schedule; after a stall, re-anchor instead of bursting
@@ -335,7 +354,8 @@ class Recorder:
             "segments": self.enc.segments,
             "nice": os.getpriority(os.PRIO_PROCESS, 0),
         }
-        S["degraded"] = bool((iv and iv[-1] > a.degraded_ms) or self.errors or self.error)
+        S["encoder_stalled"] = self.stalled
+        S["degraded"] = bool((iv and iv[-1] > a.degraded_ms) or self.errors or self.error or self.stalled)
         return S
 
     def main(self):
@@ -346,8 +366,18 @@ class Recorder:
         except Exception as e:   # bad PPM header, shm unreadable, ...: still write summary.json
             self.fail(f"capture: {type(e).__name__}: {e}")
         n = len(self.ts)
-        self.q.put(None)
-        wt.join()
+        if not self.stalled:
+            try:
+                self.q.put(None, timeout=self.drain_left())
+            except queue.Full:
+                self.stalled = True
+        if not self.stalled:
+            wt.join(self.drain_left())
+            self.stalled = wt.is_alive()
+        if self.stalled:   # the frames on disk stand; the summary says the rest is missing
+            self.fail(f"encoder stalled: not drained {self.a.drain_s:g} s after stop; ffmpeg killed")
+            self.enc.kill()
+            wt.join(5)
         S = self.summary()
         try:
             S["integrity"] = self.verify(n)
@@ -416,6 +446,9 @@ def main(argv=None):
     ap.add_argument("--qmp-timeout", type=float, default=600.0,
                     help="seconds for one screendump reply; a savevm/loadvm on the other socket "
                          "holds QEMU's main loop that long (same default as VMKIT_SNAPSHOT_TIMEOUT)")
+    ap.add_argument("--drain-s", type=float, default=10.0,
+                    help="after stop, give the encoder this long to drain, then kill it and flag "
+                         "encoder_stalled (under record stop's 30 s KILL escalation)")
     ap.add_argument("--max-error-s", type=float, default=10.0,
                     help="give up after this many seconds of screendump error replies in a row")
     ap.add_argument("--mark-killed", metavar="WHY",

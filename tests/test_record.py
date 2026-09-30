@@ -88,7 +88,7 @@ class CaptureErrors(unittest.TestCase):
 
     def recorder(self, **kw):
         a = argparse.Namespace(sock=self.srv.path, run=self.run, fps=100.0, shm=self.td, ffmpeg="ffmpeg",
-                               degraded_ms=1000.0, queue=16, qmp_timeout=5.0, max_error_s=10.0)
+                               degraded_ms=1000.0, queue=16, qmp_timeout=5.0, max_error_s=10.0, drain_s=10.0)
         for k, v in kw.items():
             setattr(a, k, v)
         return record.Recorder(a)
@@ -243,6 +243,31 @@ class CaptureErrors(unittest.TestCase):
     def test_summary_written_when_the_ppm_is_missing(self):
         S = self.summary_after(lambda args: {"return": {}})    # replies ok, writes nothing
         self.assertIn("No such file", S["error"])
+
+    def test_a_stalled_encoder_ends_in_bounded_time_flagged(self):
+        stall = os.path.join(self.td, "ffmpeg")   # never reads its input
+        with open(stall, "w") as f:
+            f.write("#!/bin/sh\nexec sleep 300\n")
+        os.chmod(stall, 0o755)
+        R = self.recorder(ffmpeg=stall, queue=4, drain_s=1.0)
+        self.addCleanup(lambda: R.enc.proc and R.enc.proc.kill())
+        t = threading.Thread(target=lambda: setattr(R, "rc", R.main()), daemon=True)
+        t.start()
+        time.sleep(1.0)
+        proc = R.enc.proc
+        self.assertIsNotNone(proc, "no encoder started")
+        t0 = time.monotonic()
+        R.stop.set()
+        t.join(6)
+        self.assertFalse(t.is_alive(), "recorder hung on the stalled encoder")
+        self.assertLess(time.monotonic() - t0, 5)
+        self.assertEqual(R.rc, 1)
+        self.assertIsNotNone(proc.poll(), "ffmpeg left running")
+        with open(os.path.join(self.run, "summary.json")) as f:
+            S = json.load(f)
+        self.assertIs(S["encoder_stalled"], True)
+        self.assertIs(S["degraded"], True)
+        self.assertIn("encoder stalled", S["error"])
 
     def test_default_qmp_timeout_outlasts_savevm_loadvm(self):
         with mock.patch.object(record, "Recorder") as Rec, mock.patch("signal.signal"):
