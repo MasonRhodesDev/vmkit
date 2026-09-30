@@ -133,7 +133,8 @@ $V report                            # -> <run>/report.html
   screendump call time, and `degraded=true` when any interval exceeded 50 ms
   (`--degraded-ms`) or a screendump failed: a busy host shows up in the
   numbers instead of being assumed away. A failed screendump (an error reply)
-  is a logged gap, not the end: the recorder stops only after 30 in a row, on
+  is a gap, not the end (each run of them is a row in `gaps.jsonl`,
+  `{t_from, t_to, errors, reason}`): the recorder stops only after 30 in a row, on
   EOF, or when one reply takes over 600 s (a snapshot/restore mid-recording
   is a long gap). The recorder runs under the same nice/ionice as qemu.
 - **Actions**: `keys`/`type`/`move`/`click`/`tap`/`tap-text`/`drag`/`scroll`
@@ -144,7 +145,10 @@ $V report                            # -> <run>/report.html
   only the command.
 - **`frames`**: `+300ms` = the first frame at or after anchor+300 ms;
   `+50ms..+300ms` = every frame in the window; an empty window or an offset
-  outside the recording is an error (exit 2).
+  outside the recording is an error (exit 2). So is a sampling gap: a window
+  that overlaps a `gaps.jsonl` row (even with frames on both sides), and a
+  point whose frame is more than max(2 x the median frame interval, 100 ms)
+  after it.
 - **`check`** (`lib/vmkit/checks.py`): `pixel`, `ocr`, `template`, `changed`,
   regions `[x,y,w,h]` with negative x/y from the right/bottom and 0 w/h to the
   edge, `--not` on any check; inactive frames are errors. A window passes when

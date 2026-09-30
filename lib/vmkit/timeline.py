@@ -9,6 +9,11 @@ Rules:
   * a window with no frame in it is an error, not a pass; so is a point with
     no frame at or after it, and any offset that falls outside the recording
     (before the first frame's request, or after the last frame).
+  * sampling gaps are errors too: a window that overlaps a gap in gaps.jsonl
+    (a run of screendump errors: no frame exists for it, even when frames lie
+    on both sides), and a point whose frame is more than
+    max(2 x the recording's median frame interval, 100 ms) after it (an error
+    gap or an ordinary slow interval).
   * the baseline for `changed` is the last frame with t < anchor.
 
 CLI (`vmkit frames`):
@@ -65,10 +70,26 @@ def load_jsonl(path):
     return out
 
 
+class Frames(list):
+    """A recording's frames (sorted by t), with its sampling gaps (gaps.jsonl rows)."""
+    gaps = ()
+
+
 def load_frames(run):
-    fr = load_jsonl(os.path.join(run, "frames.jsonl"))
+    fr = Frames(load_jsonl(os.path.join(run, "frames.jsonl")))
     fr.sort(key=lambda f: f["t"])
+    p = os.path.join(run, "gaps.jsonl")
+    fr.gaps = load_jsonl(p) if os.path.exists(p) else []
     return fr
+
+
+LATE_FLOOR_NS = 100 * 1_000_000
+
+
+def late_limit(frames):
+    """How far after a point its frame may be: max(2 x median interval, 100 ms)."""
+    iv = sorted(frames[i]["t"] - frames[i - 1]["t"] for i in range(1, len(frames)))
+    return max(2 * iv[len(iv) // 2] if iv else 0, LATE_FLOOR_NS)
 
 
 def load_actions(run):
@@ -95,6 +116,10 @@ def select_point(frames, t):
     _coverage(frames, t, t, "offset")
     for f in frames:
         if f["t"] >= t:
+            limit = late_limit(frames)
+            if f["t"] - t > limit:
+                raise TimelineError(f"the first frame after the offset is {(f['t'] - t) / 1e6:.1f} ms late "
+                                    f"(limit {limit / 1e6:.0f} ms): sampling gap")
             return f
     raise TimelineError("no frame at or after the offset")
 
@@ -102,6 +127,10 @@ def select_point(frames, t):
 def select_window(frames, t0, t1):
     """Every frame with t0 <= f.t <= t1; empty is an error."""
     _coverage(frames, t0, t1, "window")
+    for g in getattr(frames, "gaps", ()):
+        if g["t_from"] <= t1 and g["t_to"] >= t0:
+            raise TimelineError(f"the window overlaps a sampling gap ({(g['t_to'] - g['t_from']) / 1e6:.1f} ms, "
+                                f"{g.get('errors', '?')} errors: {g.get('reason', '')})")
     got = [f for f in frames if t0 <= f["t"] <= t1]
     if not got:
         raise TimelineError(f"no frame in the window ({(t1 - t0) / 1e6:.1f} ms wide)")

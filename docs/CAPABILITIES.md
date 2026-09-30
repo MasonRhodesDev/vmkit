@@ -40,7 +40,8 @@ QEMU layer, so it holds for any guest OS.
 - `record start [--fps N] [--out RUN]` / `record stop` / `record status` — a
   separate recorder process on `qmp-rec.sock` (never blocks other commands).
   Run dir: `frames.jsonl` `{n, t_req, t, inactive}`, `frames/%06d.png`,
-  `video.mkv` (ffv1), `segments.jsonl`, `summary.json` (fps, interval
+  `video.mkv` (ffv1), `segments.jsonl`, `gaps.jsonl` (runs of screendump
+  errors: no frame), `summary.json` (fps, interval
   p50/p95/max, `degraded`), `actions.jsonl`.
 - Every input action is stamped `t_send`/`t_ack` (host `CLOCK_MONOTONIC` ns,
   the recorder's clock) with `ok`/`error`; `VMKIT_STEP` labels it.

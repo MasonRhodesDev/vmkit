@@ -45,7 +45,30 @@ class Selection(unittest.TestCase):
     def test_point_is_first_frame_at_or_after(self):
         self.assertEqual(T.select_point(self.F, 1066 * MS)["n"], 2)       # exactly at
         self.assertEqual(T.select_point(self.F, 1067 * MS)["n"], 3)       # just after
-        self.assertEqual(T.select_point(self.F, 1201 * MS)["n"], 7)       # across a gap
+
+    def test_late_point_is_error(self):
+        # the first frame after +1201 ms is 299 ms late: more than max(2 x 33 ms, 100 ms)
+        with self.assertRaises(T.TimelineError) as cm:
+            T.select_point(self.F, 1201 * MS)
+        self.assertIn("late", str(cm.exception))
+        self.assertEqual(T.select_point(self.F, 1401 * MS)["n"], 7)       # 99 ms: fine
+
+    def test_late_limit_follows_the_frame_interval(self):
+        F = frames([1000, 1200, 1400, 1600, 2000, 2200])    # 5 fps: limit 2 x 200 ms
+        self.assertEqual(T.select_point(F, 1601 * MS)["n"], 4)            # 399 ms
+        with self.assertRaises(T.TimelineError):
+            T.select_point(frames([1000, 1200, 1400, 1600, 2100, 2300]), 1601 * MS)   # 499 ms
+
+    def test_window_over_a_sampling_gap_is_error(self):
+        F = T.Frames(self.F)
+        F.gaps = [{"t_from": 1210 * MS, "t_to": 1490 * MS, "errors": 8, "reason": "screendump error: x"}]
+        with self.assertRaises(T.TimelineError) as cm:
+            T.select_window(F, 1150 * MS, 1520 * MS)                      # frames on both sides
+        self.assertIn("gap", str(cm.exception))
+        with self.assertRaises(T.TimelineError) as cm:
+            T.select(F, 1000 * MS, "+150ms..+250ms")                      # frames before the gap only
+        self.assertIn("gap", str(cm.exception))
+        self.assertEqual([f["n"] for f in T.select_window(F, 1033 * MS, 1100 * MS)], [1, 2, 3])
 
     def test_point_outside_recording_is_error(self):
         with self.assertRaises(T.TimelineError):
@@ -134,6 +157,12 @@ class CLI(unittest.TestCase):
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 2)
             self.assertIn("no frame in the window", r.stderr)
+            with open(os.path.join(d, "gaps.jsonl"), "w") as f:
+                f.write(json.dumps({"t_from": 1034 * MS, "t_to": 1060 * MS, "errors": 1, "reason": "x"}) + "\n")
+            r = subprocess.run(cli + ["--at", str(1000 * MS), "--offset", "+0ms..+100ms"],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 2, r.stdout)
+            self.assertIn("gap", r.stderr)
 
 
 if __name__ == "__main__":

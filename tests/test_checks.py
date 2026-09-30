@@ -301,6 +301,17 @@ class Evaluate(Tmp):
         r = self.ev(**dict(box, at="+100ms..+140ms"), **{"not": True})  # frame 6 only: no box
         self.assertEqual(r["status"], "pass")
 
+    def test_not_on_a_window_over_a_sampling_gap_is_error(self):
+        # frame 6 (1198 ms) lacks the box; screendump errors from 1205 to 1228 ms left no frame
+        from vmkit import timeline as T
+        with open(os.path.join(self.run_dir, "gaps.jsonl"), "w") as f:
+            f.write(json.dumps({"t_from": 1205_000_000, "t_to": 1228_000_000, "errors": 1, "reason": "x"}) + "\n")
+        self.frames = T.load_frames(self.run_dir)
+        r = self.ev(check="pixel", at="+100ms..+140ms", region=[20, 20, 10, 10], color="#00b4ff",
+                    **{"not": True})
+        self.assertEqual(r["status"], "error")
+        self.assertIn("gap", r["error"])
+
     def test_point_before_action_as_baseline_check(self):
         r = self.ev(check="pixel", at="-50ms", region=[20, 20, 10, 10], color="#00b4ff", **{"not": True})
         self.assertEqual(r["status"], "pass")
