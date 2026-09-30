@@ -23,6 +23,9 @@
 #   --arch A           VMKIT_ARCH        qemu-system-<A> (x86_64 default)
 #   --accel A          VMKIT_ACCEL       kvm (default) | tcg
 #   --vnc N            VMKIT_VNC         also expose VNC on 127.0.0.1:590N
+#   --nice N           VMKIT_NICE        nice level for qemu/recorder (19)
+#   --ionice C         VMKIT_IONICE      ionice class for qemu/recorder (3 = idle;
+#                                        "none" to skip)
 #
 # Collaboration: start with `--view vnc` so the agent (QMP: shot/keys/mouse) and
 # the human (a VNC client) drive the SAME running VM together. `vmkit view` opens
@@ -84,6 +87,9 @@ ARCH="${VMKIT_ARCH:-x86_64}"; ACCEL="${VMKIT_ACCEL:-kvm}"
 # the SAME running VM), or gtk (a native window; only works when vmkit is run
 # from a graphical shell). vnc is the collaborative default recommendation.
 VIEW="${VMKIT_VIEW:-none}"
+# CPU/IO priority for qemu (and the recorder): nice level and ionice class
+# (3 = idle; "none" skips ionice). The host may be someone's desktop.
+NICE="${VMKIT_NICE:-19}"; IONICE="${VMKIT_IONICE:-3}"
 
 args=()
 while [ $# -gt 0 ]; do
@@ -100,6 +106,8 @@ while [ $# -gt 0 ]; do
         --vnc) VIEW="vnc:$2"; shift 2;;
         --arch) ARCH="$2"; shift 2;;
         --accel) ACCEL="$2"; shift 2;;
+        --nice) NICE="$2"; shift 2;;
+        --ionice) IONICE="$2"; shift 2;;
         --) shift; args+=("$@"); break;;
         *) args+=("$1"); shift;;
     esac
@@ -164,6 +172,10 @@ if (strict and txt.strip()) or txt.lstrip().lower().startswith("error"):
 sys.stdout.write(txt)
 PY
 }
+
+# Priority prefix for long-lived host processes (qemu, recorder).
+prio=(nice -n "$NICE")
+if [ "$IONICE" != none ] && command -v ionice >/dev/null; then prio+=(ionice -c "$IONICE"); fi
 
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN"
           -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3
@@ -344,7 +356,7 @@ up)
         *) machine=virt ;;
     esac
     echo "== vmkit up: $(basename "$OVERLAY")  arch=$ARCH accel=$ACCEL  view=$VIEW  serial=$SERIAL_LOG  qmp=$QMP_SOCK  ssh=$SSH_PORT$([ -f "$VNCFILE" ] && echo "  vnc=127.0.0.1:$(cat "$VNCFILE")")"
-    nice -n 19 "qemu-system-$ARCH" \
+    "${prio[@]}" "qemu-system-$ARCH" \
         -name "vmkit-$(basename "$OVERLAY" .qcow2)" \
         -machine "$machine,accel=$ACCEL" -cpu "$cpu" -m "$MEM" -smp "$SMP" \
         "${fw[@]}" \

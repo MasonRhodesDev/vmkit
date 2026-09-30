@@ -122,3 +122,6 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
   `printf %q`; a single arg is still a shell command line (`ssh 'a | b'`).
   Footnote: `%q` writes `$'...'` for non-printable bytes, which needs a
   bash/zsh/ksh (or POSIX-2024 sh) login shell in the guest.
+- **`up` set nice but not ionice** — qemu's disk I/O competed at normal
+  priority. Fixed: qemu runs under `nice -n $VMKIT_NICE ionice -c $VMKIT_IONICE`
+  (defaults 19 and 3 = idle; `--nice`/`--ionice`, `--ionice none` to skip).
