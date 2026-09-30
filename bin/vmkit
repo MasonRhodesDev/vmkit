@@ -570,7 +570,7 @@ wait)
                    cur="$TMPD/vmkit-st.$$.$((waited % 2)).ppm"
                    dump_ppm "$cur"
                    if [ -n "$prev" ]; then
-                       d=$(magick compare -metric AE -fuzz 4% "$prev" "$cur" null: 2>&1 | tr -cd '0-9'); d="${d:-999999}"
+                       d=$(magick compare -metric AE -fuzz 4% "$prev" "$cur" null: 2>&1 | awk 'NR==1{print int($1)}'); d="${d:-999999}"
                        if [ "$d" -lt "$thresh" ]; then stable=$((stable+1)); else stable=0; fi
                        [ "$stable" -ge "$want" ] && { echo "screen stable (last diff ${d}px)"; exit 0; }
                    fi
@@ -606,7 +606,7 @@ watch)  # emit a line whenever the screen changes beyond VMKIT_STABLE_PX, until
         cur="$TMPD/vmkit-w.$$.$((waited % 2)).ppm"
         dump_ppm "$cur"
         if [ -n "$prev" ]; then
-            d=$(magick compare -metric AE -fuzz 4% "$prev" "$cur" null: 2>&1 | tr -cd '0-9'); d="${d:-0}"
+            d=$(magick compare -metric AE -fuzz 4% "$prev" "$cur" null: 2>&1 | awk 'NR==1{print int($1)}'); d="${d:-0}"
             [ "$d" -ge "$thresh" ] && echo "$(date -u +%H:%M:%SZ 2>/dev/null) changed ${d}px"
         fi
         prev="$cur"; sleep 1 2>/dev/null || :; waited=$((waited+1))

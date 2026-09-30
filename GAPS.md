@@ -142,3 +142,7 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
 - **No session-side wait** — `wait exec` runs over plain ssh, without the
   graphical session's env. New: `wait xexec CMD [timeout]` polls CMD through the
   same env resolver as `xexec` (e.g. `wait xexec 'hyprctl clients | grep -q foot'`).
+- **`wait screen`/`watch` misread ImageMagick 7.1's AE output** — `magick
+  compare -metric AE` prints `N (fraction)`; stripping non-digits glued both
+  numbers together, so any nonzero diff looked huge and a screen with a
+  ticking clock never counted as stable. Fixed: take the first number.
