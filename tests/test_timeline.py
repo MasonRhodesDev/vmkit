@@ -87,13 +87,25 @@ class Actions(unittest.TestCase):
     A = [{"cmd": "keys", "t_send": 10, "t_ack": 20}, {"cmd": "type", "step": "typing", "t_send": 30, "t_ack": 40}]
 
     def test_find(self):
-        self.assertEqual(T.find_action(self.A, "0")["cmd"], "keys")
-        self.assertEqual(T.find_action(self.A, "-1")["cmd"], "type")
+        self.assertEqual(T.find_action(self.A, "#0")["cmd"], "keys")
+        self.assertEqual(T.find_action(self.A, "#-1")["cmd"], "type")
+        self.assertEqual(T.find_action(self.A, 0)["cmd"], "keys")       # a JSON int is an index
+        self.assertEqual(T.find_action(self.A, -1)["cmd"], "type")
         self.assertEqual(T.find_action(self.A, "typing")["cmd"], "type")
-        with self.assertRaises(T.TimelineError):
-            T.find_action(self.A, "5")
-        with self.assertRaises(T.TimelineError):
-            T.find_action(self.A, "nope")
+        for bad in ("#5", 5, "nope", "#x", "0"):                         # "0": no step labelled "0"
+            with self.assertRaises(T.TimelineError, msg=bad):
+                T.find_action(self.A, bad)
+
+    def test_numeric_step_label(self):
+        A = [{"cmd": "keys", "step": "1"}, {"cmd": "type", "step": "2"}, {"cmd": "click"}]
+        self.assertEqual(T.find_action(A, "2")["cmd"], "type")          # the label, not index 2
+        self.assertEqual(T.find_action(A, "#2")["cmd"], "click")        # the index
+
+    def test_repeated_label_is_ambiguous(self):
+        A = [{"cmd": "keys", "step": "go"}, {"cmd": "type", "step": "go"}]
+        with self.assertRaises(T.TimelineError) as cm:
+            T.find_action(A, "go")
+        self.assertIn("ambiguous", str(cm.exception))
 
     def test_anchor(self):
         self.assertEqual(T.anchor_of(self.A[1], "send"), 30)
@@ -111,7 +123,7 @@ class CLI(unittest.TestCase):
             with open(os.path.join(d, "actions.jsonl"), "w") as f:
                 f.write(json.dumps({"cmd": "keys", "t_send": 1010 * MS, "t_ack": 1020 * MS}) + "\n")
             cli = [sys.executable, os.path.join(ROOT, "lib", "vmkit", "timeline.py"), "--run", d]
-            r = subprocess.run(cli + ["--action", "0", "--anchor", "ack", "--offset", "+0ms..+50ms",
+            r = subprocess.run(cli + ["--action", "#0", "--anchor", "ack", "--offset", "+0ms..+50ms",
                                       "--baseline", "--json"], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             rows = [json.loads(x) for x in r.stdout.splitlines()]

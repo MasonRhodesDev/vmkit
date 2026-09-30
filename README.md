@@ -105,7 +105,7 @@ $V record stop                       # frames 163  fps 30.0  interval p50 33.3 p
 
 $V frames --action open --offset +0ms..+400ms --baseline   # which frames the Timing rules pick
 $V check changed --action open --offset +0ms..+1500ms --region 22,22,1236,756 --min-px 1000
-$V check ocr --action -1 --anchor ack --offset +100ms..+1s --region 0,0,0,200 --text 'echo hi'
+$V check ocr --action '#-1' --anchor ack --offset +100ms..+1s --region 0,0,0,200 --text 'echo hi'
 $V check batch expect.json           # many expectations -> <run>/results.json (exit 0/1/2)
 $V report                            # -> <run>/report.html
 ```

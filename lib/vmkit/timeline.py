@@ -12,7 +12,7 @@ Rules:
   * the baseline for `changed` is the last frame with t < anchor.
 
 CLI (`vmkit frames`):
-  timeline.py [--dir VMKIT_DIR] [--run RUN] (--at T_NS | --action N|STEP [--anchor send|ack])
+  timeline.py [--dir VMKIT_DIR] [--run RUN] (--at T_NS | --action '#N'|STEP [--anchor send|ack])
               --offset SPEC[,SPEC...] [--baseline] [--json]
 Prints one line per selected frame: spec, n, t, ms from anchor, path[, inactive].
 Exit 0, or 2 when an offset cannot be resolved (message on stderr).
@@ -128,14 +128,20 @@ def baseline(frames, anchor):
 
 
 def find_action(actions, ref):
-    """ref: int index (negative from the end) or a step label."""
-    try:
-        i = int(ref)
-    except (TypeError, ValueError):
+    """ref: an int or "#N" = index into actions.jsonl (negative from the end);
+    any other string = the step label, exactly (so a label may be "2"). A label
+    on more than one action is ambiguous: an error, as is no match."""
+    if isinstance(ref, str) and not ref.startswith("#"):
         hits = [a for a in actions if a.get("step") == ref]
         if not hits:
-            raise TimelineError(f"no action with step {ref!r}")
+            raise TimelineError(f"no action with step {ref!r} (an index is written #N, e.g. #0 or #-1)")
+        if len(hits) > 1:
+            raise TimelineError(f"step {ref!r} is ambiguous: {len(hits)} actions carry it (use #N)")
         return hits[0]
+    try:
+        i = int(ref[1:] if isinstance(ref, str) else ref)
+    except (TypeError, ValueError):
+        raise TimelineError(f"bad action index {ref!r} (want #N, e.g. #0 or #-1)") from None
     if not actions:
         raise TimelineError("no actions recorded")
     try:
@@ -173,7 +179,8 @@ def main(argv):
     ap.add_argument("--run")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--at", type=int, help="anchor, CLOCK_MONOTONIC ns")
-    g.add_argument("--action", help="anchor on an action: index in actions.jsonl (-1 = last) or step label")
+    g.add_argument("--action", help="anchor on an action: #N = index in actions.jsonl (#-1 = last; quote "
+                                    "it in a shell), anything else = its step label (exact, unique)")
     ap.add_argument("--anchor", choices=["send", "ack"], default="send")
     ap.add_argument("--offset", required=True, help="comma-separated: +100ms or +0ms..+400ms")
     ap.add_argument("--baseline", action="store_true", help="also print the last frame before the anchor")

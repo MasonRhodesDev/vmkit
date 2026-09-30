@@ -78,7 +78,7 @@
 #                            start [--fps N] [--out RUNDIR] -> prints the run dir
 #                            (frames.jsonl, frames/%06d.png, video.mkv, summary.json);
 #                            input actions meanwhile also go to <run>/actions.jsonl
-#   frames (--at T_NS | --action N|STEP [--anchor send|ack]) --offset SPEC[,..]
+#   frames (--at T_NS | --action '#N'|STEP [--anchor send|ack]) --offset SPEC[,..]
 #                            [--run DIR] [--baseline] [--json]: frames chosen by
 #                            the schema's Timing rules (+100ms = first frame at or
 #                            after; +0ms..+400ms = every frame in the window; an

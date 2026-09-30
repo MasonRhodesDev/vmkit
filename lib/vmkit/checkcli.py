@@ -7,7 +7,7 @@ One check on explicit frames:
   vmkit check template --frame F --image T.png (--region .. | --near X,Y --radius R) [--threshold 0.9]
 
 The same, with frames chosen from a recording by the Timing rules (instead of --frame):
-  ... [--run RUN] (--at T_NS | --action N|STEP [--anchor send|ack]) --offset SPEC [--mode any|all]
+  ... [--run RUN] (--at T_NS | --action '#N'|STEP [--anchor send|ack]) --offset SPEC [--mode any|all]
   (`changed` then uses the last frame before the anchor as its baseline. A window
   defaults to --mode any, or to all with --not: "in no frame of the window".)
 
@@ -18,7 +18,9 @@ A batch of expectations (what a scenario runner calls):
 EXPECT.json is a list of objects:
   {"id": "...", "action": N|"step", "anchor": "send"|"ack", "at": "+50ms..+300ms",
    "mode": "any"|"all", "check": "pixel", ...check fields..., "not": false}
-(or "t": T_NS instead of "action"). Relative template paths resolve against
+(or "t": T_NS instead of "action"). "action" is an index into actions.jsonl
+(an int, or "#N"; negative from the end) or a step label (exact; a label on
+several actions is an error). Relative template paths resolve against
 EXPECT.json's directory. Writes results.json (default <run>/results.json):
 per expectation its status (pass/fail/error), the frames used with their
 per-frame status and measured values. Exit 0 all pass, 1 a check failed,

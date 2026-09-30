@@ -44,7 +44,9 @@ QEMU layer, so it holds for any guest OS.
   p50/p95/max, `degraded`), `actions.jsonl`.
 - Every input action is stamped `t_send`/`t_ack` (host `CLOCK_MONOTONIC` ns,
   the recorder's clock) with `ok`/`error`; `VMKIT_STEP` labels it.
-- `frames --action N|STEP [--anchor send|ack] --offset +100ms,+0ms..+400ms`
+- `frames --action '#N'|STEP [--anchor send|ack] --offset +100ms,+0ms..+400ms`
+  (`#N` = index into actions.jsonl, `#-1` the last; any other value is an
+  exact step label, and a label on several actions is an error)
   — frame selection by the schema's Timing rules; unresolvable = exit 2.
 - `check pixel|ocr|template|changed ...` and `check batch EXPECT.json` —
   model-free; exit 0 pass, 1 fail, 2 error.
