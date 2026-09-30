@@ -137,6 +137,22 @@ class CaptureErrors(unittest.TestCase):
         self.assertIn("5 errors in a row", R.error or "")
         self.assertEqual(len(R.ts), 2)
 
+    def test_stop_interrupts_a_hung_screendump(self):
+        n = {"i": 0}
+
+        def h(args):         # QEMU stops answering after a few frames (qmp_timeout is long)
+            n["i"] += 1
+            return self.srv.screendump(args) if n["i"] <= 3 else None
+        self.srv.handlers["screendump"] = h
+        R = self.recorder(qmp_timeout=60.0)
+        ct = threading.Thread(target=R.capture, daemon=True); ct.start()
+        time.sleep(0.5)
+        R.stop.set()
+        ct.join(2)
+        self.assertFalse(ct.is_alive(), "stop did not interrupt the screendump read")
+        self.assertIsNone(R.error)
+        self.assertEqual(len(R.ts), 3)
+
     def test_eof_is_fatal(self):
         self.srv.handlers["screendump"] = lambda args: (lambda f: f.close())   # QEMU went away
         R = self.recorder()

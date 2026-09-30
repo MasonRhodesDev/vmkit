@@ -192,9 +192,9 @@ class Recorder:
         limit_ns = int(a.degraded_ms * 1e6)
         shm = os.path.join(a.shm, f"vmkit-rec.{os.getpid()}.ppm")
         try:
-            qmp = QMP(a.sock, timeout=a.qmp_timeout)
+            qmp = QMP(a.sock, timeout=a.qmp_timeout, stop=self.stop)
         except QMPError as e:
-            return self.fail(f"qmp: {e}")
+            return None if self.stop.is_set() else self.fail(f"qmp: {e}")
         frames = open(os.path.join(self.run, "frames.jsonl"), "a", buffering=1)
         n = 0; t_next = now(); prev_t = None; was_inactive = False; consec = 0
         try:

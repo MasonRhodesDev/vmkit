@@ -166,7 +166,7 @@ class VmkitCLI(unittest.TestCase):
         srv = FakeQMP(os.path.join(self.dir, "qmp-rec.sock"))
         self.srv = srv
 
-        def trickle(f):     # never completes a reply line: readline blocks, the socket timeout never fires
+        def trickle(f):     # never completes a reply line (the recorder's reply deadline is 600 s)
             while not srv.closing.wait(0.5):
                 f.write(b" ")
         srv.handlers["screendump"] = lambda args: trickle
