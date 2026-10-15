@@ -115,6 +115,13 @@ class Actor:
         self._cmd("send-key", {"keys": [{"type": "qcode", "data": k} for k in keys]})
 
 
+# Pause between the characters of `type`. Back-to-back send-key chords lose
+# events in the guest (a dropped shift release turns the rest of the text
+# upper-case, a dropped ctrl breaks the next chord); spacing them out keeps
+# every press and release. VMKIT_TYPE_GAP_MS overrides it.
+TYPE_GAP = float(os.environ.get("VMKIT_TYPE_GAP_MS", "40")) / 1000
+
+
 NEEDS_SIZE = {"move", "tap", "tap-text", "drag"}
 
 
@@ -164,7 +171,9 @@ def run_qmp(op, a, sock, tmp):
                 bad = sorted({ch for ch in text if not (ch in SHIFTED or ch in BASE or (ch.isupper() and ch.lower() in BASE))})
                 if bad:
                     raise ValueError(f"no key mapping for {''.join(bad)!r} (US-ASCII only)")
-                for ch in text:
+                for i, ch in enumerate(text):
+                    if i:
+                        time.sleep(TYPE_GAP)
                     if ch in SHIFTED:
                         A.keys(["shift", SHIFTED[ch]])
                     elif ch in BASE:

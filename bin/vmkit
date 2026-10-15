@@ -98,6 +98,11 @@
 # it tracks the qemu pid in <dir>/qemu.pid and acts on that.
 set -euo pipefail
 
+# tesseract's OpenMP threads spin against each other on a busy host: one OCR
+# pass took 90 s on a loaded 12-core box and 1.6 s with a single thread. One
+# frame is small work, so default to one thread; a caller's setting wins.
+export OMP_THREAD_LIMIT="${OMP_THREAD_LIMIT:-1}"
+
 # ---- config resolution -------------------------------------------------------
 OVERLAY="${VMKIT_OVERLAY:-}"; CIDATA="${VMKIT_CIDATA:-}"; DIR="${VMKIT_DIR:-}"
 SSH_PORT="${VMKIT_SSH_PORT:-2222}"; SSH_USER="${VMKIT_SSH_USER:-$USER}"
