@@ -27,7 +27,9 @@ QEMU layer, so it holds for any guest OS.
 - `keys K [K...]` — QMP qcodes: `ret esc tab spc up down left right`,
   letters/digits, and chords like `ctrl-alt-f2`, `shift-1`, `ctrl-c`.
 - `type TEXT` — types a US-ASCII string (shifted symbols handled; see GAPS for
-  layout limits).
+  layout limits), one chord per character with a 40 ms gap between them
+  (`VMKIT_TYPE_GAP_MS`): sent back to back, the guest lost key events (a
+  dropped shift release turned the rest of the text upper-case).
 
 ## Console & shell
 - `serial [N]` — last N lines of the serial/console log; the only window into

@@ -193,7 +193,11 @@ def ocr_text(path, region=None, scale=2, psm=None):
                 raise CheckError(f"magick resize failed: {r.stderr.decode(errors='replace').strip()}")
         else:
             imageio.write_png(img, src, level=1)
-        r = subprocess.run([tess, src, "-", "--psm", str(psm)], capture_output=True)
+        # One OpenMP thread (see OMP_THREAD_LIMIT in bin/vmkit): many threads
+        # thrash on a busy host and make each pass take tens of seconds.
+        env = dict(os.environ)
+        env.setdefault("OMP_THREAD_LIMIT", "1")
+        r = subprocess.run([tess, src, "-", "--psm", str(psm)], capture_output=True, env=env)
         if r.returncode != 0:
             raise CheckError(f"tesseract failed: {r.stderr.decode(errors='replace').strip()[-300:]}")
     return r.stdout.decode(errors="replace"), box

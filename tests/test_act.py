@@ -38,6 +38,16 @@ class ActQMP(unittest.TestCase):
         self.assertTrue(rec["ok"], rec.get("error"))
         self.assertEqual([e["data"]["value"] for e in self.events()[0]], [32767, 0])
 
+    def test_type_paces_its_chords(self):
+        # One send-key per character, in order, with TYPE_GAP between them
+        # (back-to-back chords lost a shift release in the guest).
+        with mock.patch.object(act.time, "sleep") as sleep:
+            rec, msg = act.run_qmp("type", ["Hi", "1"], self.sock, self.td)
+        self.assertTrue(rec["ok"], rec.get("error"))
+        sent = [[k["data"] for k in a["keys"]] for ex, a in self.srv.requests if ex == "send-key"]
+        self.assertEqual(sent, [["shift", "h"], ["i"], ["spc"], ["1"]])
+        self.assertEqual([c.args for c in sleep.call_args_list], [(act.TYPE_GAP,)] * 3)
+
     def main_logged(self, *argv):
         with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
             rc = act.main(["--dir", self.td, "--tmp", self.td] + list(argv))
