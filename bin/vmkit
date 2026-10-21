@@ -82,6 +82,9 @@
 #   snapshot NAME            qcow2 internal snapshot (HMP savevm)
 #   restore NAME             load a snapshot (HMP loadvm; needs the same devices)
 #   snapshots                list snapshots (HMP info snapshots)
+#   head-size H WxH [HOLD_S] bring head H (1..N-1 of --heads N) up at WxH. A head past the
+#                            first stays "disconnected" in the guest until something sets
+#                            its size; this does, over that head's VNC socket
 #   record start|stop|status  frame recorder (lib/vmkit/record.py) on qmp-rec.sock:
 #                            start [--fps N] [--out RUNDIR] -> prints the run dir
 #                            (frames.jsonl, frames/%06d.png, video.mkv, summary.json);
@@ -398,6 +401,10 @@ up)
             else echo "vmkit: no aarch64 UEFI firmware found (install edk2-aarch64/AAVMF)" >&2; exit 3; fi ;;
         *) machine=virt ;;
     esac
+    # Each head past the first gets a VNC server of its own (unix socket): the only
+    # way to bring that output up with no GUI attached, see `head-size`.
+    hvnc=(); h=1; while [ "$h" -lt "$HEADS" ]; do
+        rm -f "$DIR/head$h.sock"; hvnc+=(-vnc "unix:$DIR/head$h.sock,display=$GPU_ID,head=$h"); h=$((h+1)); done
     add_ionice
     echo "== vmkit up: $(basename "$OVERLAY")  arch=$ARCH accel=$ACCEL  view=$VIEW  serial=$SERIAL_LOG  qmp=$QMP_SOCK  ssh=$SSH_PORT$([ -f "$VNCFILE" ] && echo "  vnc=127.0.0.1:$(cat "$VNCFILE")")"
     "${prio[@]}" "qemu-system-$ARCH" \
@@ -408,7 +415,7 @@ up)
         "${cidata[@]}" \
         -netdev user,id=net0,hostfwd=tcp:127.0.0.1:"$SSH_PORT"-:22 \
         -device virtio-net-pci,netdev=net0 \
-        "${gpu[@]}" "${disp[@]}" \
+        "${gpu[@]}" "${disp[@]}" ${hvnc[@]+"${hvnc[@]}"} \
         -serial file:"$SERIAL_LOG" \
         -qmp unix:"$QMP_SOCK",server,nowait \
         -qmp unix:"$QMP_REC_SOCK",server,nowait \
@@ -416,6 +423,13 @@ up)
         -pidfile "$PIDFILE" \
         ${QEMU_EXTRA[@]+"${QEMU_EXTRA[@]}"} &
     echo "   qemu pid $!"
+    ;;
+head-size)
+    [ "$HEADS" -gt 1 ] || { echo "vmkit head-size: needs --heads N (N > 1)" >&2; exit 2; }
+    [ $# -ge 2 ] && [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -lt "$HEADS" ] \
+        || { echo "usage: vmkit --heads N head-size H WxH [HOLD_S]   (1 <= H < N)" >&2; exit 2; }
+    h="$1"; shift
+    python3 "$VMKIT_LIB/vmkit/headsize.py" "$DIR/head$h.sock" "$@"
     ;;
 status)
     echo "qmp   : $([ -S "$QMP_SOCK" ] && echo "$QMP_SOCK" || echo absent)"
