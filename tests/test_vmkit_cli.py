@@ -344,6 +344,10 @@ class VmkitCLI(unittest.TestCase):
         self.assertIn("virtio-vga,id=gpu0,max_outputs=2", argv)
         self.assertNotIn("-vga", argv)
 
+    def test_up_gpu_opts_set_the_preferred_mode(self):
+        r, argv = self.up({"VMKIT_HEADS": "2", "VMKIT_GPU_OPTS": "xres=1536 yres=960"})
+        self.assertIn("virtio-vga,id=gpu0,max_outputs=2,xres=1536,yres=960", argv)
+
     def test_up_one_head_keeps_vga_virtio(self):
         r, argv = self.up({})
         self.assertIn("-vga", argv)

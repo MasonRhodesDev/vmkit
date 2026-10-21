@@ -28,6 +28,9 @@
 #   --ionice C         VMKIT_IONICE      ionice class for qemu/recorder (3 = idle;
 #                                        "none" to skip)
 #   --heads N          VMKIT_HEADS       virtio-gpu heads (outputs) in the guest (1)
+#   --gpu-opt K=V      VMKIT_GPU_OPTS    virtio-gpu property (xres=, yres=, ...), repeatable;
+#                                        the env var is a space-separated list. Every
+#                                        head prefers xres x yres
 #   --head H           VMKIT_HEAD        which head shot/find/check/record and the
 #                                        pointer commands address (0); with
 #                                        --heads 1 the single screen
@@ -116,6 +119,7 @@ ARCH="${VMKIT_ARCH:-x86_64}"; ACCEL="${VMKIT_ACCEL:-kvm}"
 # Heads: with more than one, the GPU is a named virtio-gpu with max_outputs=N and
 # screendump has to say which head (and device) it wants. GPU_ID names the device.
 HEADS="${VMKIT_HEADS:-1}"; HEAD="${VMKIT_HEAD:-0}"; GPU_ID=gpu0
+GPU_OPTS=(); [ -n "${VMKIT_GPU_OPTS:-}" ] && read -ra GPU_OPTS <<<"$VMKIT_GPU_OPTS"
 # VIEW controls the human-facing display: none (agent-only, headless),
 # vnc[:N] (shared live view — agent drives QMP, human attaches a VNC client to
 # the SAME running VM), or gtk (a native window; only works when vmkit is run
@@ -150,6 +154,7 @@ while [ $# -gt 0 ]; do
         --arch) ARCH="$2"; shift 2;;
         --accel) ACCEL="$2"; shift 2;;
         --heads) HEADS="$2"; shift 2;;
+        --gpu-opt) GPU_OPTS+=("$2"); shift 2;;
         --head) HEAD="$2"; shift 2;;
         --nice) NICE="$2"; shift 2;;
         --qemu-arg) QEMU_EXTRA+=("$2"); shift 2;;
@@ -375,11 +380,12 @@ up)
     # neither and needs UEFI firmware (pflash) + virtio-gpu/xhci.
     [ "$ACCEL" = kvm ] && cpu=host || cpu=max
     fw=(); gpu=(-vga virtio); usb=(-usb)
-    [ "$HEADS" -gt 1 ] && gpu=(-device "virtio-vga,id=$GPU_ID,max_outputs=$HEADS")
+    gpu_props=""; for o in ${GPU_OPTS[@]+"${GPU_OPTS[@]}"}; do gpu_props+=",$o"; done
+    [ "$HEADS" -gt 1 ] || [ -n "$gpu_props" ] && gpu=(-device "virtio-vga,id=$GPU_ID,max_outputs=$HEADS$gpu_props")
     case "$ARCH" in
         x86_64|i386) machine=q35 ;;
         aarch64|arm)
-            machine=virt; gpu=(-device "virtio-gpu-pci,id=$GPU_ID,max_outputs=$HEADS"); usb=(-device qemu-xhci)
+            machine=virt; gpu=(-device "virtio-gpu-pci,id=$GPU_ID,max_outputs=$HEADS$gpu_props"); usb=(-device qemu-xhci)
             # UEFI: readonly code + a per-VM writable vars copy. (Loop, not
             # `ls A B C` — ls exits non-zero on any missing path and pipefail
             # would abort under set -e.)
