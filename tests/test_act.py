@@ -33,6 +33,12 @@ class ActQMP(unittest.TestCase):
         self.assertEqual([e["data"]["value"] for e in ev[0]], [16384, 16384])
         self.assertEqual([e["data"]["down"] for e in ev[1] + ev[2]], [True, False])
 
+    def test_size_comes_from_the_chosen_head(self):
+        rec, _ = act.run_qmp("tap", ["100", "0"], self.sock, self.td, gpu="gpu0", head=1)
+        self.assertTrue(rec["ok"], rec.get("error"))
+        dumps = [a for ex, a in self.srv.requests if ex == "screendump"]
+        self.assertEqual((dumps[0]["device"], dumps[0]["head"]), ("gpu0", 1))
+
     def test_tap_moves_and_clicks(self):
         rec, _ = act.run_qmp("tap", ["100", "0"], self.sock, self.td)
         self.assertTrue(rec["ok"], rec.get("error"))

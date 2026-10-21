@@ -61,8 +61,11 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
   but there is no `tap-template` to click one yet.
 - **Keymap** — `type` is US-ASCII; non-US layouts, unicode, compose unmapped.
   Want layout-aware typing or clipboard paste.
-- **Multi-head / resolution changes** — pixel->abs mapping assumes one display
-  at the current framebuffer size.
+- **Multi-head / resolution changes** — Heads: `--heads N` boots a virtio-gpu with
+  `max_outputs=N`, and `--head H` points `shot`, `find`, `check`, `record` and the
+  pointer's size lookup at one head. Still open: the pointer is one absolute
+  device, so it is only mapped to a single head's size; `record` records one head
+  per run; a resolution change mid-run is not followed.
 - **Provisioning** — `image pull` fetches a base, but cloud-init/autoinstall
   seed generation is still caller-supplied (`--cidata`).
 - **Multi-VM networks** — single VM only; no client+server / cluster topology.
@@ -158,7 +161,7 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
   - `check` is slow on big regions (pure-Python `changed` loop, one
     tesseract run per OCR frame): ~20 s for ~80 frames of a 1236x756 region.
     Fine for post-run checks; not for live waits.
-  - Only the default console/head is recorded (multi-head: see above).
+  - One head is recorded per run (`--head`; the default console without `--heads`).
   - `t` is the screendump reply time; the capture instant is somewhere in
     `[t_req, t]` (p95 ~5 ms here, 0.5-2 s when QEMU stalls; see 2026-08-23).
   - The report's video is ffv1/mkv (lossless); browsers do not play it.

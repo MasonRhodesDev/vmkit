@@ -27,6 +27,10 @@
 #   --nice N           VMKIT_NICE        nice level for qemu/recorder (19)
 #   --ionice C         VMKIT_IONICE      ionice class for qemu/recorder (3 = idle;
 #                                        "none" to skip)
+#   --heads N          VMKIT_HEADS       virtio-gpu heads (outputs) in the guest (1)
+#   --head H           VMKIT_HEAD        which head shot/find/check/record and the
+#                                        pointer commands address (0); with
+#                                        --heads 1 the single screen
 #   --qemu-arg ARG     VMKIT_QEMU_ARGS   extra qemu argv, appended last (flag is
 #                                        repeatable; the env var is split with
 #                                        shell quoting rules, via python shlex)
@@ -109,6 +113,9 @@ SSH_PORT="${VMKIT_SSH_PORT:-2222}"; SSH_USER="${VMKIT_SSH_USER:-$USER}"
 SSH_KEY="${VMKIT_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 MEM="${VMKIT_MEM:-4096}"; SMP="${VMKIT_SMP:-4}"
 ARCH="${VMKIT_ARCH:-x86_64}"; ACCEL="${VMKIT_ACCEL:-kvm}"
+# Heads: with more than one, the GPU is a named virtio-gpu with max_outputs=N and
+# screendump has to say which head (and device) it wants. GPU_ID names the device.
+HEADS="${VMKIT_HEADS:-1}"; HEAD="${VMKIT_HEAD:-0}"; GPU_ID=gpu0
 # VIEW controls the human-facing display: none (agent-only, headless),
 # vnc[:N] (shared live view — agent drives QMP, human attaches a VNC client to
 # the SAME running VM), or gtk (a native window; only works when vmkit is run
@@ -142,6 +149,8 @@ while [ $# -gt 0 ]; do
         --vnc) VIEW="vnc:$2"; shift 2;;
         --arch) ARCH="$2"; shift 2;;
         --accel) ACCEL="$2"; shift 2;;
+        --heads) HEADS="$2"; shift 2;;
+        --head) HEAD="$2"; shift 2;;
         --nice) NICE="$2"; shift 2;;
         --qemu-arg) QEMU_EXTRA+=("$2"); shift 2;;
         --ionice) IONICE="$2"; shift 2;;
@@ -150,6 +159,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 set -- "${args[@]}"
+case "$HEADS" in ''|*[!0-9]*|0) echo "vmkit: --heads must be a positive integer (got '$HEADS')" >&2; exit 2;; esac
+case "$HEAD" in ''|*[!0-9]*) echo "vmkit: --head must be a non-negative integer (got '$HEAD')" >&2; exit 2;; esac
+[ "$HEAD" -lt "$HEADS" ] || { echo "vmkit: --head $HEAD but the guest has $HEADS head(s) (0-based)" >&2; exit 2; }
+# Head selection as act.py / vmkit-record options (empty for one head).
+HEAD_OPTS=(); [ "$HEADS" -gt 1 ] && HEAD_OPTS=(--gpu "$GPU_ID" --head "$HEAD")
 cmd="${1:-status}"; shift || true
 
 [ -n "$DIR" ] || { [ -n "$OVERLAY" ] && DIR="$(dirname "$OVERLAY")/.vmkit" || DIR="$PWD/.vmkit"; }
@@ -292,8 +306,9 @@ PY
 # convert on the host when they need PNG. QEMU < 7.1 has no "format" argument
 # but writes PPM by default, so fall back to that.
 dump_ppm() {  # dump_ppm <out.ppm>
-    qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s","format":"ppm"}}' "$1")" >/dev/null 2>&1 \
-        || qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s"}}' "$1")" >/dev/null
+    local dev=""; [ "$HEADS" -gt 1 ] && dev="$(printf ',"device":"%s","head":%s' "$GPU_ID" "$HEAD")"
+    qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s","format":"ppm"%s}}' "$1" "$dev")" >/dev/null 2>&1 \
+        || qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s"%s}}' "$1" "$dev")" >/dev/null
 }
 
 # frame_diff <prev.ppm> <cur.ppm>: pixels that differ (magick compare -fuzz 4%;
@@ -320,7 +335,7 @@ print(json.dumps({"t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "cmd"
 # CLOCK_MONOTONIC (t_send before the first QMP write, t_ack after the last
 # reply) and appends it to actions.jsonl (and to the active recording's run
 # dir). Pointer pixels map to the abs axis using the live framebuffer size.
-act() { python3 "$VMKIT_LIB/vmkit/act.py" --dir "$DIR" --sock "$QMP_SOCK" --tmp "$TMPD" "$@"; }
+act() { python3 "$VMKIT_LIB/vmkit/act.py" --dir "$DIR" --sock "$QMP_SOCK" --tmp "$TMPD" ${HEAD_OPTS[@]+"${HEAD_OPTS[@]}"} "$@"; }
 # stamped <name> <shown-args> <argv...>: run a subprocess (stdio inherited),
 # stamped and logged the same way.
 stamped() { local n="$1" shown="$2"; shift 2; python3 "$VMKIT_LIB/vmkit/act.py" --dir "$DIR" exec "$n" "$shown" -- "$@"; }
@@ -360,10 +375,11 @@ up)
     # neither and needs UEFI firmware (pflash) + virtio-gpu/xhci.
     [ "$ACCEL" = kvm ] && cpu=host || cpu=max
     fw=(); gpu=(-vga virtio); usb=(-usb)
+    [ "$HEADS" -gt 1 ] && gpu=(-device "virtio-vga,id=$GPU_ID,max_outputs=$HEADS")
     case "$ARCH" in
         x86_64|i386) machine=q35 ;;
         aarch64|arm)
-            machine=virt; gpu=(-device virtio-gpu-pci); usb=(-device qemu-xhci)
+            machine=virt; gpu=(-device "virtio-gpu-pci,id=$GPU_ID,max_outputs=$HEADS"); usb=(-device qemu-xhci)
             # UEFI: readonly code + a per-VM writable vars copy. (Loop, not
             # `ls A B C` — ls exits non-zero on any missing path and pipefail
             # would abort under set -e.)
@@ -510,7 +526,7 @@ record)
         # would block a caller reading it (same footgun as `up`).
         add_ionice
         setsid "${prio[@]}" python3 "$(dirname "$VMKIT_LIB")/bin/vmkit-record" --sock "$QMP_REC_SOCK" \
-            --run "$out" --fps "$fps" --degraded-ms "$dms" >>"$out/recorder.out" 2>&1 </dev/null &
+            --run "$out" --fps "$fps" --degraded-ms "$dms" ${HEAD_OPTS[@]+"${HEAD_OPTS[@]}"} >>"$out/recorder.out" 2>&1 </dev/null &
         rp=$!; echo "$rp" >"$REC_PID"; echo "$out" >"$REC_RUN"
         # Block until the first frame is stamped, so actions after this are
         # covered. Liveness here is pid-only: $rp is our own child, and until

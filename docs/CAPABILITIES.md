@@ -6,7 +6,8 @@ QEMU layer, so it holds for any guest OS.
 ## Lifecycle
 - `up` — boot `--overlay` headless with serial + QMP; human view per `--view`
   (`none` default, `vnc[:N]`, or `gtk`). Idempotent: a second `up` is a no-op
-  if the VM already answers QMP.
+  if the VM already answers QMP. `--heads N` gives the guest N virtio-gpu heads
+  (`max_outputs=N`); `--head H` selects the head the vision commands read.
 - `status` — QMP socket, SSH reachability, run-state, guest uname.
 - `down` — QMP `system_powerdown`; if the guest doesn't stop, kill by pidfile.
 - `snapshot NAME` / `restore NAME` — qcow2 internal `savevm`/`loadvm` (HMP via

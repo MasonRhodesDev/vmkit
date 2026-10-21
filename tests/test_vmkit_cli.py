@@ -339,6 +339,35 @@ class VmkitCLI(unittest.TestCase):
         self.assertIn("ionice", r.stderr)
         self.assertIn("-pidfile", argv)
 
+    def test_up_heads_names_the_gpu_with_max_outputs(self):
+        r, argv = self.up({"VMKIT_HEADS": "2"})
+        self.assertIn("virtio-vga,id=gpu0,max_outputs=2", argv)
+        self.assertNotIn("-vga", argv)
+
+    def test_up_one_head_keeps_vga_virtio(self):
+        r, argv = self.up({})
+        self.assertIn("-vga", argv)
+        self.assertFalse([a for a in argv if "max_outputs" in a])
+
+    def test_head_out_of_range_is_an_error(self):
+        r = self.vmkit("--heads", "2", "--head", "2", "status")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("2 head", r.stderr)
+
+    def test_shot_addresses_the_chosen_head(self):
+        self.qmp()
+        r = self.vmkit("--heads", "2", "--head", "1", "shot", "h1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        args = [a for ex, a in self.srv.requests if ex == "screendump"]
+        self.assertEqual((args[0]["device"], args[0]["head"]), ("gpu0", 1))
+
+    def test_shot_one_head_sends_no_device(self):
+        self.qmp()
+        r = self.vmkit("shot", "h0")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        args = [a for ex, a in self.srv.requests if ex == "screendump"]
+        self.assertNotIn("device", args[0])
+
     def test_up_qemu_args_env_is_shell_split(self):
         extra = "-device 'virtio-rng-pci,id=r 1'\n-smp 2  -name \"a b\""
         r, argv = self.up({"VMKIT_QEMU_ARGS": extra})

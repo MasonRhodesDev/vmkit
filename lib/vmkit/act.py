@@ -19,7 +19,7 @@ dir), to <run>/actions.jsonl as well. Fields:
   step     $VMKIT_STEP when set (lets a runner label its steps)
   x, y     pointer target, when there is one
 
-Usage: act.py --dir DIR --sock QMP_SOCK [--tmp TMPD] OP ARGS...
+Usage: act.py --dir DIR --sock QMP_SOCK [--tmp TMPD] [--gpu ID --head N] OP ARGS...
        act.py --dir DIR exec NAME DISPLAY_ARGS -- ARGV...   (subprocess, stdio inherited)
 """
 import json
@@ -72,13 +72,14 @@ def log(d, rec):
             pass
 
 
-def fb_size(q, tmp):
+def fb_size(q, tmp, gpu=None, head=0):
     path = os.path.join(tmp, f"vmkit-act.{os.getpid()}.ppm")
+    sel = {"device": gpu, "head": head} if gpu else {}     # several heads: say which
     try:
         try:
-            q.cmd("screendump", {"filename": path, "format": "ppm"})
+            q.cmd("screendump", {"filename": path, "format": "ppm", **sel})
         except QMPError:
-            q.cmd("screendump", {"filename": path})     # QEMU < 7.1: PPM, no format arg
+            q.cmd("screendump", {"filename": path, **sel})     # QEMU < 7.1: PPM, no format arg
         return imageio.size(path)
     finally:
         try:
@@ -125,7 +126,7 @@ TYPE_GAP = float(os.environ.get("VMKIT_TYPE_GAP_MS", "40")) / 1000
 NEEDS_SIZE = {"move", "tap", "tap-text", "drag"}
 
 
-def run_qmp(op, a, sock, tmp):
+def run_qmp(op, a, sock, tmp, gpu=None, head=0):
     """Perform op; returns (record fields, stdout message)."""
     try:
         q = QMP(sock)
@@ -137,7 +138,7 @@ def run_qmp(op, a, sock, tmp):
         rec, msg = {}, ""
         try:
             if op in NEEDS_SIZE:
-                A.size = fb_size(q, tmp)
+                A.size = fb_size(q, tmp, gpu, head)
             if op == "move":
                 A.moveto(a[0], a[1]); rec.update(x=int(a[0]), y=int(a[1])); msg = f"move {a[0]},{a[1]}"
             elif op == "click":
@@ -193,13 +194,15 @@ def run_qmp(op, a, sock, tmp):
 
 
 def main(argv):
-    d = sock = shown_override = None; tmp = "/dev/shm" if os.access("/dev/shm", os.W_OK) else None
+    d = sock = shown_override = gpu = None; head = 0; tmp = "/dev/shm" if os.access("/dev/shm", os.W_OK) else None
     while argv and argv[0].startswith("--"):
         k, v = argv[0], argv[1]; argv = argv[2:]
         if k == "--dir": d = v
         elif k == "--sock": sock = v
         elif k == "--tmp": tmp = v
         elif k == "--shown": shown_override = v
+        elif k == "--gpu": gpu = v
+        elif k == "--head": head = int(v)
         else: sys.exit(f"act.py: unknown option {k}")
     tmp = tmp or d
     op, a = argv[0], argv[1:]
@@ -220,7 +223,7 @@ def main(argv):
         log(d, rec)
         return rc
     shown = shown_override or (" ".join(a) if op != "type" else f"({len(' '.join(a))} chars)")
-    fields, msg = run_qmp(op, a, sock, tmp)
+    fields, msg = run_qmp(op, a, sock, tmp, gpu, head)
     rec = {"t": wall(), "cmd": op, "args": shown}
     rec.update(fields)
     log(d, rec)

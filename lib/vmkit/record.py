@@ -215,6 +215,8 @@ class Recorder:
             qmp = QMP(a.sock, timeout=a.qmp_timeout, stop=self.stop)
         except QMPError as e:
             return None if self.stop.is_set() else self.fail(f"qmp: {e}")
+        gpu = getattr(a, "gpu", None)
+        sel = {"device": gpu, "head": getattr(a, "head", 0)} if gpu else {}    # several heads: record one
         frames = open(os.path.join(self.run, "frames.jsonl"), "a", buffering=1)
         n = 0; t_next = now(); prev_t = None; was_inactive = False; consec = 0
         gap = None      # the open run of errors: {"t_from", "errors", "reason"}
@@ -227,7 +229,7 @@ class Recorder:
             while not self.stop.is_set():
                 t_req = now()
                 try:
-                    qmp.cmd("screendump", {"filename": shm, "format": "ppm"})
+                    qmp.cmd("screendump", {"filename": shm, "format": "ppm", **sel})
                 except QMPClosed as e:
                     if not self.stop.is_set():
                         self.fail(f"screendump: {e}")
@@ -437,6 +439,8 @@ def main(argv=None):
     ap.add_argument("--sock", help="recorder QMP socket (qmp-rec.sock); required to record")
     ap.add_argument("--run", required=True, help="run dir (created)")
     ap.add_argument("--fps", type=float, default=30.0)
+    ap.add_argument("--gpu", help="QEMU id of the GPU device, to record one head of several")
+    ap.add_argument("--head", type=int, default=0, help="head of --gpu to record")
     ap.add_argument("--shm", default="/dev/shm" if os.access("/dev/shm", os.W_OK) else None,
                     help="scratch dir for the PPM (tmpfs)")
     ap.add_argument("--ffmpeg", default=shutil.which("ffmpeg") or "ffmpeg")
