@@ -7,7 +7,11 @@ QEMU layer, so it holds for any guest OS.
 - `up` — boot `--overlay` headless with serial + QMP; human view per `--view`
   (`none` default, `vnc[:N]`, or `gtk`). Idempotent: a second `up` is a no-op
   if the VM already answers QMP. `--heads N` gives the guest N virtio-gpu heads
-  (`max_outputs=N`); `--head H` selects the head the vision commands read.
+  (`max_outputs=N`); `--head H` selects the head the vision commands read. Heads past the first
+  start disconnected: `head-size H WxH` brings one up (over its own VNC socket) and `--gpu-opt
+  xres=W --gpu-opt yres=H` sets the mode every head prefers. The pointer is one absolute device
+  spread over the whole output layout, so with several heads `--pointer-area WxH` gives the layout's
+  size and `move`/`tap`/`drag` coordinates are positions in it.
 - `status` — QMP socket, SSH reachability, run-state, guest uname.
 - `down` — QMP `system_powerdown`; if the guest doesn't stop, kill by pidfile.
 - `snapshot NAME` / `restore NAME` — qcow2 internal `savevm`/`loadvm` (HMP via
