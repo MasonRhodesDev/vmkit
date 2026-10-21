@@ -34,6 +34,11 @@
 #   --head H           VMKIT_HEAD        which head shot/find/check/record and the
 #                                        pointer commands address (0); with
 #                                        --heads 1 the single screen
+#   --pointer-area WxH VMKIT_POINTER_AREA the area `move`/`tap`/`drag` coordinates are in, when it
+#                                        is not the head's framebuffer: the guest maps the one
+#                                        absolute pointer over its whole output layout, so with
+#                                        several heads use the layout's size in the compositor's
+#                                        (logical) units, e.g. 2048x768 for two 1024-wide heads
 #   --qemu-arg ARG     VMKIT_QEMU_ARGS   extra qemu argv, appended last (flag is
 #                                        repeatable; the env var is split with
 #                                        shell quoting rules, via python shlex)
@@ -121,7 +126,7 @@ MEM="${VMKIT_MEM:-4096}"; SMP="${VMKIT_SMP:-4}"
 ARCH="${VMKIT_ARCH:-x86_64}"; ACCEL="${VMKIT_ACCEL:-kvm}"
 # Heads: with more than one, the GPU is a named virtio-gpu with max_outputs=N and
 # screendump has to say which head (and device) it wants. GPU_ID names the device.
-HEADS="${VMKIT_HEADS:-1}"; HEAD="${VMKIT_HEAD:-0}"; GPU_ID=gpu0
+HEADS="${VMKIT_HEADS:-1}"; HEAD="${VMKIT_HEAD:-0}"; GPU_ID=gpu0; POINTER_AREA="${VMKIT_POINTER_AREA:-}"
 GPU_OPTS=(); [ -n "${VMKIT_GPU_OPTS:-}" ] && read -ra GPU_OPTS <<<"$VMKIT_GPU_OPTS"
 # VIEW controls the human-facing display: none (agent-only, headless),
 # vnc[:N] (shared live view — agent drives QMP, human attaches a VNC client to
@@ -158,6 +163,7 @@ while [ $# -gt 0 ]; do
         --accel) ACCEL="$2"; shift 2;;
         --heads) HEADS="$2"; shift 2;;
         --gpu-opt) GPU_OPTS+=("$2"); shift 2;;
+        --pointer-area) POINTER_AREA="$2"; shift 2;;
         --head) HEAD="$2"; shift 2;;
         --nice) NICE="$2"; shift 2;;
         --qemu-arg) QEMU_EXTRA+=("$2"); shift 2;;
@@ -172,6 +178,8 @@ case "$HEAD" in ''|*[!0-9]*) echo "vmkit: --head must be a non-negative integer 
 [ "$HEAD" -lt "$HEADS" ] || { echo "vmkit: --head $HEAD but the guest has $HEADS head(s) (0-based)" >&2; exit 2; }
 # Head selection as act.py / vmkit-record options (empty for one head).
 HEAD_OPTS=(); [ "$HEADS" -gt 1 ] && HEAD_OPTS=(--gpu "$GPU_ID" --head "$HEAD")
+case "$POINTER_AREA" in ""|[0-9]*x[0-9]*) ;; *) echo "vmkit: --pointer-area must be WxH (got '$POINTER_AREA')" >&2; exit 2;; esac
+ACT_OPTS=(${HEAD_OPTS[@]+"${HEAD_OPTS[@]}"}); [ -n "$POINTER_AREA" ] && ACT_OPTS+=(--area "$POINTER_AREA")
 cmd="${1:-status}"; shift || true
 
 [ -n "$DIR" ] || { [ -n "$OVERLAY" ] && DIR="$(dirname "$OVERLAY")/.vmkit" || DIR="$PWD/.vmkit"; }
@@ -343,7 +351,7 @@ print(json.dumps({"t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "cmd"
 # CLOCK_MONOTONIC (t_send before the first QMP write, t_ack after the last
 # reply) and appends it to actions.jsonl (and to the active recording's run
 # dir). Pointer pixels map to the abs axis using the live framebuffer size.
-act() { python3 "$VMKIT_LIB/vmkit/act.py" --dir "$DIR" --sock "$QMP_SOCK" --tmp "$TMPD" ${HEAD_OPTS[@]+"${HEAD_OPTS[@]}"} "$@"; }
+act() { python3 "$VMKIT_LIB/vmkit/act.py" --dir "$DIR" --sock "$QMP_SOCK" --tmp "$TMPD" ${ACT_OPTS[@]+"${ACT_OPTS[@]}"} "$@"; }
 # stamped <name> <shown-args> <argv...>: run a subprocess (stdio inherited),
 # stamped and logged the same way.
 stamped() { local n="$1" shown="$2"; shift 2; python3 "$VMKIT_LIB/vmkit/act.py" --dir "$DIR" exec "$n" "$shown" -- "$@"; }

@@ -39,6 +39,12 @@ class ActQMP(unittest.TestCase):
         dumps = [a for ex, a in self.srv.requests if ex == "screendump"]
         self.assertEqual((dumps[0]["device"], dumps[0]["head"]), ("gpu0", 1))
 
+    def test_area_replaces_the_framebuffer_size(self):
+        rec, _ = act.run_qmp("tap", ["2047", "0"], self.sock, self.td, area=(2048, 768))
+        self.assertTrue(rec["ok"], rec.get("error"))
+        self.assertEqual([e["data"]["value"] for e in self.events()[0]], [32767, 0])
+        self.assertFalse([1 for ex, _ in self.srv.requests if ex == "screendump"])
+
     def test_tap_moves_and_clicks(self):
         rec, _ = act.run_qmp("tap", ["100", "0"], self.sock, self.td)
         self.assertTrue(rec["ok"], rec.get("error"))
