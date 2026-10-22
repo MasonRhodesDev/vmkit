@@ -29,7 +29,10 @@
 #                                        "none" to skip)
 #   --gpu-heads N      VMKIT_GPU_HEADS   (up) N outputs on one virtio GPU (id gpu0);
 #                                        screendump/record/pointer address them by head
-#   --gpu-res WxH      VMKIT_GPU_RES     (up) EDID/default mode of every virtio head (1280x800)
+#   --gpu-res WxH      VMKIT_GPU_RES     (up) mode of head 0 and default of the rest (1280x800)
+#   --gpu-modes L      VMKIT_GPU_MODES   (up) one WxH per head, comma separated, e.g.
+#                                        3440x1440,1920x1080,3840x2160: enables heads 1.. and
+#                                        sets each head's mode (see README, Multi-head)
 #   --uefi             VMKIT_UEFI=1      (up) boot x86 under OVMF (UEFI) instead of SeaBIOS;
 #                                        NVRAM persists in <dir>/efivars.fd
 #   --head N           VMKIT_HEAD        shot/find/tap-text/pointer: act on head N (0)
@@ -129,7 +132,7 @@ NICE="${VMKIT_NICE:-19}"; IONICE="${VMKIT_IONICE:-3}"
 # Extra qemu arguments, appended last so they can override: --qemu-arg ARG
 # (repeatable, one argv element each) and/or VMKIT_QEMU_ARGS (split like a
 # shell would, by python shlex: quotes group, newlines separate).
-GPU_HEADS="${VMKIT_GPU_HEADS:-}"; GPU_RES="${VMKIT_GPU_RES:-}"; UEFI="${VMKIT_UEFI:-}"
+GPU_HEADS="${VMKIT_GPU_HEADS:-}"; GPU_RES="${VMKIT_GPU_RES:-}"; GPU_MODES="${VMKIT_GPU_MODES:-}"; UEFI="${VMKIT_UEFI:-}"
 HEAD="${VMKIT_HEAD:-0}"; LAYOUT="${VMKIT_LAYOUT:-}"; ALLHEADS=""
 QEMU_EXTRA=()
 if [ -n "${VMKIT_QEMU_ARGS:-}" ]; then
@@ -156,6 +159,7 @@ while [ $# -gt 0 ]; do
         --nice) NICE="$2"; shift 2;;
         --gpu-heads) GPU_HEADS="$2"; shift 2;;
         --gpu-res) GPU_RES="$2"; shift 2;;
+        --gpu-modes) GPU_MODES="$2"; shift 2;;
         --uefi) UEFI=1; shift;;
         --head) HEAD="$2"; HEAD_EXPLICIT=1; shift 2;;
         --layout) LAYOUT="$2"; shift 2;;
@@ -372,7 +376,7 @@ up)
     [ -n "$OVERLAY" ] && [ -f "$OVERLAY" ] || { echo "vmkit: --overlay PATH required (got '$OVERLAY')" >&2; exit 2; }
     if [ -S "$QMP_SOCK" ] && qmp '{"execute":"query-status"}' >/dev/null 2>&1; then
         echo "already up (qmp $QMP_SOCK, ssh $SSH_PORT)"; exit 0; fi
-    rm -f "$QMP_SOCK" "$QMP_REC_SOCK" "$DIR"/qmp-rec-h*.sock "$VNCFILE" "$DIR/gpu.json"; : >"$SERIAL_LOG"
+    rm -f "$QMP_SOCK" "$QMP_REC_SOCK" "$DIR"/qmp-rec-h*.sock "$DIR"/vnc-h*.sock "$VNCFILE" "$DIR/gpu.json"; : >"$SERIAL_LOG"
     case "$VIEW" in
         none)      disp=(-display none);;
         gtk)       disp=(-display gtk,show-cursor=on);;
@@ -407,6 +411,13 @@ up)
     # A recorder-only QMP socket per extra head lets one recorder per head run in
     # parallel (a QMP socket serves one client at a time).
     recsocks=()
+    modes=()
+    if [ -n "$GPU_MODES" ]; then
+        IFS=, read -r -a modes <<<"$GPU_MODES"
+        [ -n "$GPU_HEADS" ] || GPU_HEADS="${#modes[@]}"
+        [ "${#modes[@]}" -eq "$GPU_HEADS" ] || { echo "vmkit: --gpu-modes lists ${#modes[@]} modes for $GPU_HEADS heads" >&2; exit 2; }
+        GPU_RES="${modes[0]}"
+    fi
     if [ -n "$GPU_HEADS$GPU_RES" ]; then
         gh="${GPU_HEADS:-1}"; res="${GPU_RES:-1280x800}"
         [[ "$gh" =~ ^[1-9][0-9]?$ ]] || { echo "vmkit: --gpu-heads must be 1..99, got '$gh'" >&2; exit 2; }
@@ -416,7 +427,13 @@ up)
             *)           gpu=(-device "virtio-gpu-pci,id=gpu0,max_outputs=$gh,xres=${res%x*},yres=${res#*x}");;
         esac
         printf '{"id":"gpu0","heads":%s,"res":"%s"}\n' "$gh" "$res" >"$DIR/gpu.json"
-        for ((i = 1; i < gh; i++)); do recsocks+=(-qmp "unix:$DIR/qmp-rec-h$i.sock,server,nowait"); done
+        # Output N > 0 stays "disconnected" in the guest until something sets that
+        # console's UI info, and a headless QEMU has no UI. A VNC server bound to head N
+        # does it when asked for a desktop size (lib/vmkit/rfb.py), so each extra head
+        # gets a unix-socket VNC server, used only by `up` and `heads set`.
+        for ((i = 1; i < gh; i++)); do
+            recsocks+=(-qmp "unix:$DIR/qmp-rec-h$i.sock,server,nowait" -vnc "unix:$DIR/vnc-h$i.sock,display=gpu0,head=$i")
+        done
     fi
     # UEFI on x86: OVMF code (readonly) + a per-VM vars copy that keeps the NVRAM
     # (boot entries) between boots. aarch64 always uses UEFI, above.
@@ -446,6 +463,16 @@ up)
         -pidfile "$PIDFILE" \
         ${QEMU_EXTRA[@]+"${QEMU_EXTRA[@]}"} &
     echo "   qemu pid $!"
+    # Enable the extra heads right away, so the firmware and the kernel see them.
+    # Heads without a listed mode get --gpu-res.
+    if [ -n "${gh:-}" ] && [ "$gh" -gt 1 ]; then
+        for ((i = 1; i < gh; i++)); do
+            m="${modes[$i]:-$res}"
+            for _ in $(seq 1 100); do [ -S "$DIR/vnc-h$i.sock" ] && break; sleep 0.1 2>/dev/null || :; done
+            python3 "$VMKIT_LIB/vmkit/rfb.py" set-size "$DIR/vnc-h$i.sock" "${m%x*}" "${m#*x}" \
+                || echo "vmkit: could not enable head $i" >&2
+        done
+    fi
     ;;
 status)
     echo "qmp   : $([ -S "$QMP_SOCK" ] && echo "$QMP_SOCK" || echo absent)"
@@ -475,6 +502,14 @@ shot)
     done
     ;;
 heads)
+    if [ "${1:-}" = set ]; then   # heads set N WxH: enable head N (>= 1) or resize it, live
+        n="${2:?vmkit heads set N WxH}"; m="${3:?vmkit heads set N WxH}"
+        [[ "$m" =~ ^[0-9]+x[0-9]+$ ]] || { echo "vmkit heads set: mode must be WxH" >&2; exit 2; }
+        python3 "$VMKIT_LIB/vmkit/heads.py" dump-args "$DIR" /dev/null "$n" >/dev/null || exit 2
+        [ -S "$DIR/vnc-h$n.sock" ] || { echo "vmkit heads set: no head $n control socket (head 0's size is --gpu-res; start with --gpu-heads)" >&2; exit 2; }
+        python3 "$VMKIT_LIB/vmkit/rfb.py" set-size "$DIR/vnc-h$n.sock" "${m%x*}" "${m#*x}"
+        exit
+    fi
     read -r _dev nheads < <(python3 "$VMKIT_LIB/vmkit/heads.py" info "$DIR")
     for ((h = 0; h < nheads; h++)); do
         ppm="$TMPD/vmkit-heads.$$.ppm"

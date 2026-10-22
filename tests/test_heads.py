@@ -18,6 +18,37 @@ def read_lines(path):
 LAYOUT = "0,0,1920,1080;1920,0,3440,1440;5360,0,2160,3840"
 
 
+class Rfb(unittest.TestCase):
+    def test_set_size_speaks_the_handshake_and_sends_set_desktop_size(self):
+        import socket, struct, tempfile, threading
+        from vmkit import rfb
+        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "v.sock")
+        srv = socket.socket(socket.AF_UNIX); srv.bind(path); srv.listen(1)
+        got = {}
+
+        def serve():
+            c, _ = srv.accept()
+            c.sendall(b"RFB 003.008\n"); c.recv(12)
+            c.sendall(b"\x01\x01"); c.recv(1); c.sendall(b"\0\0\0\0"); c.recv(1)
+            c.sendall(struct.pack(">HH", 640, 480) + bytes(16) + struct.pack(">I", 2) + b"qe")
+            buf = b""
+            while len(buf) < 12 + 8 + 16:
+                chunk = c.recv(64)
+                if not chunk:
+                    break
+                buf += chunk
+            got["msg"] = buf
+            c.close()
+        t = threading.Thread(target=serve); t.start()
+        rfb.set_size(path, 1920, 1080)
+        t.join(5); srv.close()
+        m = got["msg"]
+        self.assertEqual(m[0], 2)                                    # SetEncodings
+        self.assertEqual(m[12], 251)                                 # SetDesktopSize
+        self.assertEqual(struct.unpack(">HH", m[14:18]), (1920, 1080))
+
+
 class Helpers(unittest.TestCase):
     def test_screendump_args_head0_is_the_default_console(self):
         self.assertEqual(heads.screendump_args("/x", None, 0), {"filename": "/x", "format": "ppm"})
@@ -179,6 +210,24 @@ class MultiHeadCLI(unittest.TestCase):
         self.assertEqual(sum(1 for a in argv if a.startswith("unix:") and "qmp-rec-h" in a), 2)
         with open(os.path.join(self.dir, "gpu.json")) as f:
             self.assertEqual(json.load(f)["heads"], 3)
+
+    def test_up_gpu_modes_sets_the_heads_and_gives_each_extra_head_a_vnc_socket(self):
+        r, argv = self.up({"VMKIT_GPU_MODES": "3440x1440,1920x1080,3840x2160"})
+        self.assertIn("virtio-vga,id=gpu0,max_outputs=3,xres=3440,yres=1440", argv)
+        vnc = [a for a in argv if a.startswith("unix:") and "vnc-h" in a]
+        self.assertEqual([v.split(",", 1)[1] for v in vnc], ["display=gpu0,head=1", "display=gpu0,head=2"])
+
+    def test_up_gpu_modes_count_must_match_heads(self):
+        self.fake("qemu-system-x86_64", "exit 0")
+        disk = os.path.join(self.td, "disk.qcow2"); open(disk, "w").close()
+        r = self.vmkit("--overlay", disk, "up", env={"VMKIT_GPU_MODES": "1x1,2x2", "VMKIT_GPU_HEADS": "3"})
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_heads_set_needs_a_control_socket(self):
+        self.qmp(); self.gpu(3)
+        r = self.vmkit("heads", "set", "1", "800x600")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("control socket", r.stderr)
 
     def test_up_without_gpu_flags_keeps_vga_virtio(self):
         r, argv = self.up({})
