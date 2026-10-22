@@ -372,6 +372,56 @@ class VmkitCLI(unittest.TestCase):
         args = [a for ex, a in self.srv.requests if ex == "screendump"]
         self.assertNotIn("device", args[0])
 
+    def test_up_aarch64_gpu_always_names_max_outputs(self):
+        argv = os.path.join(self.td, "qemu.argv")
+        self.fake("qemu-system-aarch64", f'for a in "$@"; do printf "%s\\0" "$a"; done >{argv}.tmp; mv {argv}.tmp {argv}')
+        disk = os.path.join(self.td, "disk.qcow2")
+        open(disk, "w").close()
+        r = self.vmkit("--overlay", disk, "up", env={"VMKIT_ARCH": "aarch64", "VMKIT_ACCEL": "tcg"})
+        for _ in range(50):
+            if os.path.exists(argv):
+                break
+            time.sleep(0.1)
+        else:
+            self.fail("qemu never started: " + r.stdout + r.stderr)
+        with open(argv) as f:
+            args = f.read().split("\0")[:-1]
+        self.assertIn("virtio-gpu-pci,id=gpu0,max_outputs=1", args)
+
+    def test_head_size_needs_heads_and_a_head_in_range(self):
+        r = self.vmkit("head-size", "1", "1024x768")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("needs --heads", r.stderr)
+        for bad in (["0", "1024x768"], ["2", "1024x768"], ["x", "1024x768"], ["1"]):
+            r = self.vmkit("--heads", "2", "head-size", *bad)
+            self.assertEqual(r.returncode, 2, bad)
+            self.assertIn("usage: vmkit --heads N head-size", r.stderr)
+
+    def test_pointer_area_must_be_width_x_height(self):
+        for bad in ("2048", "axb", "2048x"):
+            r = self.vmkit("--pointer-area", bad, "status")
+            self.assertEqual(r.returncode, 2, bad)
+            self.assertIn("--pointer-area must be WxH", r.stderr)
+
+    def test_head_comes_from_the_environment_unless_the_flag_overrides_it(self):
+        self.qmp()
+        r = self.vmkit("--heads", "3", "shot", "e", env={"VMKIT_HEAD": "2"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = self.vmkit("--heads", "3", "--head", "1", "shot", "f", env={"VMKIT_HEAD": "2"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        heads = [a["head"] for ex, a in self.srv.requests if ex == "screendump"]
+        self.assertEqual(heads, [2, 1])
+
+    def test_record_start_reads_the_chosen_head(self):
+        self.srv = FakeQMP(os.path.join(self.dir, "qmp-rec.sock"))
+        self.fake("ffmpeg", "exit 0")
+        run = os.path.join(self.td, "run")
+        r = self.vmkit("--heads", "2", "--head", "1", "record", "start", "--out", run, timeout=40)
+        self.vmkit("record", "stop", timeout=40)
+        dumps = [a for ex, a in self.srv.requests if ex == "screendump"]
+        self.assertTrue(dumps, r.stdout + r.stderr)
+        self.assertEqual({(a["device"], a["head"]) for a in dumps}, {("gpu0", 1)})
+
     def test_up_qemu_args_env_is_shell_split(self):
         extra = "-device 'virtio-rng-pci,id=r 1'\n-smp 2  -name \"a b\""
         r, argv = self.up({"VMKIT_QEMU_ARGS": extra})
