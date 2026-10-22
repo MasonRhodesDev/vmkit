@@ -61,8 +61,9 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
   but there is no `tap-template` to click one yet.
 - **Keymap** — `type` is US-ASCII; non-US layouts, unicode, compose unmapped.
   Want layout-aware typing or clipboard paste.
-- **Multi-head / resolution changes** — pixel->abs mapping assumes one display
-  at the current framebuffer size.
+- **Multi-head / resolution changes** — closed for virtio multi-output, see
+  2026-10-22 below. Still open: distinct VMs per head (several GPU devices) and
+  rotating a head's frame back to compositor space.
 - **Provisioning** — `image pull` fetches a base, but cloud-init/autoinstall
   seed generation is still caller-supplied (`--cidata`).
 - **Multi-VM networks** — single VM only; no client+server / cluster topology.
@@ -158,7 +159,36 @@ editor, GTK icons, swaync styling, an idle-inhibitor tray).
   - `check` is slow on big regions (pure-Python `changed` loop, one
     tesseract run per OCR frame): ~20 s for ~80 frames of a 1236x756 region.
     Fine for post-run checks; not for live waits.
-  - Only the default console/head is recorded (multi-head: see above).
+  - Only the default head is recorded unless `record start --heads` (2026-10-22).
   - `t` is the screendump reply time; the capture instant is somewhere in
     `[t_req, t]` (p95 ~5 ms here, 0.5-2 s when QEMU stalls; see 2026-08-23).
   - The report's video is ffv1/mkv (lossless); browsers do not play it.
+
+## 2026-10-22 (multi-head)
+- **Multi-head capture — closed.** QMP `screendump` takes `device` and `head`;
+  vmkit now uses both. `up --gpu-heads N [--gpu-res WxH]` builds one virtio GPU
+  (`gpu0`) with N outputs, `shot --head N|--heads`, `heads`, `find/tap-text --head N`,
+  and `record start --heads all|0,1` (one recorder per head on its own QMP socket,
+  RUN/head<N>/ run dirs, RUN/heads.json, one shared host clock). `frames`, `check` and
+  `report` take a head's run dir; the parent dir means head 0. Actions are logged to
+  every head's `actions.jsonl`.
+- **QEMU 11.1.2 aborts on an out-of-range head.** `screendump` with `head` >=
+  max_outputs kills the VM (`Property 'qemu-fixed-text-console.device' not found`,
+  connection reset). vmkit checks the index against the head count first.
+- **Every virtio head has the same EDID mode.** `xres`/`yres` apply to all outputs and
+  `outputs` only names them, so per-head sizes come from the guest (kernel `video=`,
+  the compositor's monitor rule).
+- **Head-aware pointer — closed, with a layout.** The tablet's abs axes span the whole
+  compositor layout, so `--layout`/`VMKIT_LAYOUT` gives the heads' compositor-space
+  rectangles and `--head N X Y` maps into the bounding box. Without a layout the old
+  single-framebuffer mapping applies; `--head N` without one is an error.
+- **UEFI on x86 — `up --uefi`.** OVMF code plus a per-VM vars copy (`efivars.fd`), the
+  same shape as the aarch64 path. A raw pflash blocks `savevm`, so a UEFI VM is cold-boot only.
+- **Degraded threshold scales with the frame rate.** The fixed 50 ms flagged every
+  frame of a 5 fps recording. Default is now max(50 ms, 1.5 x period) when `--degraded-ms`
+  is not given.
+- Still open: no per-head `report` (the report is per run dir; hypr-qa's desktop-boot
+  `full-boot` builds a time-aligned multi-head page); the pointer on a rotated head
+  needs the caller to map frame pixels to compositor pixels; `ssh`-less cold boots
+  cannot poll the guest, so a recording that must start at power-on starts right after
+  `up` returns (about a second of OVMF is missed).

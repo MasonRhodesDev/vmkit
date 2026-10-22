@@ -566,11 +566,13 @@ record)
     case "$sub" in
     start)
         # record start [--fps N] [--out RUNDIR] [--degraded-ms MS]
-        fps="${VMKIT_REC_FPS:-30}"; out=""; dms="${VMKIT_REC_DEGRADED_MS:-50}"; hspec=""
+        fps="${VMKIT_REC_FPS:-30}"; out=""; dms="${VMKIT_REC_DEGRADED_MS:-}"; hspec=""
         while [ $# -gt 0 ]; do case "$1" in
             --fps) fps="$2"; shift 2;; --out) out="$2"; shift 2;; --degraded-ms) dms="$2"; shift 2;;
             --heads) hspec="${2:-all}"; shift 2;;
             *) echo "usage: vmkit record start [--fps N] [--out RUNDIR] [--degraded-ms MS] [--heads all|0,1,..]" >&2; exit 2;; esac; done
+        # "Degraded" = a frame interval over this: 50 ms at 30 fps, 1.5 x the period below ~20 fps.
+        [ -n "$dms" ] || dms=$(awk -v f="$fps" 'BEGIN { d = 1500 / f; print (d < 50 ? 50 : int(d)) }')
         rec_alive && { echo "vmkit record: already recording to $(cat "$REC_RUN") (pid $(cat "$REC_PID"))" >&2; exit 1; }
         [ -S "$QMP_REC_SOCK" ] || { echo "vmkit record: no $QMP_REC_SOCK (VM not up, or booted by a vmkit without the recorder socket)" >&2; exit 1; }
         command -v ffmpeg >/dev/null || { echo "vmkit record: needs ffmpeg" >&2; exit 3; }

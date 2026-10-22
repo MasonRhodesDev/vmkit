@@ -165,6 +165,43 @@ Scenario files (TOML, steps, hyprhands) live in the consumer (hypr-qa); vmkit
 provides the primitives. Tests: `python3 -m unittest` (stdlib; the OCR and
 template tests run where tesseract/ImageMagick exist).
 
+## Multi-head
+
+One virtio GPU with several outputs, each captured and addressed on its own.
+
+```sh
+V="bin/vmkit --overlay ~/vms/mybox/disk.qcow2"
+$V --gpu-heads 3 --gpu-res 1920x1080 --uefi up   # one virtio GPU "gpu0", 3 outputs; OVMF instead of SeaBIOS
+$V heads                                         # "0 1920x1080", "1 640x480", ...: a head with no scanout shows QEMU's 640x480 placeholder
+$V shot --heads now                              # <dir>/now-head0.png, now-head1.png, ...   (--head N for one)
+$V find --head 1 'Login'                         # OCR one head; tap-text --head N works the same
+$V record start --fps 10 --heads all             # one recorder per head, RUN/head0/, RUN/head1/, ..., RUN/heads.json
+$V record stop                                   # one summary line per head
+$V frames --run RUN/head1 --action '#0' --offset +100ms     # any run command takes a head's dir; RUN alone means head 0
+```
+
+- `up --gpu-heads N` replaces `-vga virtio` with `-vga none -device virtio-vga,id=gpu0,max_outputs=N,xres=,yres=`
+  and writes `<dir>/gpu.json`. That file (or `VMKIT_GPU_ID`/`VMKIT_GPU_HEADS` for a VM you started yourself)
+  is how `shot`, `record` and the pointer commands find the device id; a head index past the count is refused
+  before QEMU sees it, because QEMU 11.1.2 aborts the whole VM on one (`Property 'qemu-fixed-text-console.device' not found`).
+- QEMU gives every output the same EDID mode (`--gpu-res`; there is no per-output size property, `outputs`
+  only names them). Per-head sizes are the guest's job: the kernel's `video=Virtual-2:1920x1080` option, or the
+  compositor's monitor rule.
+- `up --uefi` boots x86 under OVMF. The NVRAM is `<dir>/efivars.fd`, copied from the host's OVMF_VARS once, so
+  boot entries survive reboots. A raw pflash cannot take part in `savevm`, so UEFI VMs are cold-boot only.
+- `record start --heads` starts one recorder per head. A QMP socket serves one client, so `up` opens
+  `qmp-rec.sock` for head 0 and `qmp-rec-h<N>.sock` for the others. Every head stamps frames on the host
+  `CLOCK_MONOTONIC`, so frames of different heads line up by `t`. Actions are written to every head's
+  `actions.jsonl`. At 30 fps, 4K and ultrawide heads together are heavy (PPM memcpy plus PNG and ffv1 encoding
+  per head): use `--fps 5` to `10` for a boot recording. Without `--degraded-ms` the degraded threshold is
+  1.5 frame periods below 20 fps (50 ms at 30 fps), so a slow, steady rate is not "degraded".
+- Pointer: the tablet's absolute axes span the compositor's whole layout. `--layout "X,Y,W,H;X,Y,W,H;..."`
+  (or `VMKIT_LAYOUT`) lists the heads' rectangles in the compositor's coordinates, in head order, and then
+  `move/tap/click/drag --head N X Y` takes pixels in head N's compositor space (what `hyprctl monitors`
+  reports: size after scale and rotation). With a layout and no `--head`, pixels are head 0's. For a rotated
+  head the recorded frame is the physical scanout, not the compositor's view, so map frame pixels to compositor
+  pixels yourself (see lib/vmkit/heads.py).
+
 ## Scope and non-goals
 
 vmkit is the **substrate**, deliberately thin: it turns a QEMU VM into something
