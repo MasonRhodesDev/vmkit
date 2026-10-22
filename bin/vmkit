@@ -27,6 +27,15 @@
 #   --nice N           VMKIT_NICE        nice level for qemu/recorder (19)
 #   --ionice C         VMKIT_IONICE      ionice class for qemu/recorder (3 = idle;
 #                                        "none" to skip)
+#   --gpu-heads N      VMKIT_GPU_HEADS   (up) N outputs on one virtio GPU (id gpu0);
+#                                        screendump/record/pointer address them by head
+#   --gpu-res WxH      VMKIT_GPU_RES     (up) EDID/default mode of every virtio head (1280x800)
+#   --uefi             VMKIT_UEFI=1      (up) boot x86 under OVMF (UEFI) instead of SeaBIOS;
+#                                        NVRAM persists in <dir>/efivars.fd
+#   --head N           VMKIT_HEAD        shot/find/tap-text/pointer: act on head N (0)
+#   --layout SPEC      VMKIT_LAYOUT      head rectangles in the guest compositor space,
+#                                        "X,Y,W,H;X,Y,W,H;..." in head order; needed for
+#                                        pointer commands with --head (see lib/vmkit/heads.py)
 #   --qemu-arg ARG     VMKIT_QEMU_ARGS   extra qemu argv, appended last (flag is
 #                                        repeatable; the env var is split with
 #                                        shell quoting rules, via python shlex)
@@ -44,7 +53,10 @@
 #   view                     open a VNC client to the shared view (human side)
 #   status                   sockets, ssh reachability, run-state
 #   shot [name] [--grid]     screendump -> <dir>/<name>.png; --grid overlays a
-#                            coordinate ruler so tap targets can be read off
+#                            coordinate ruler so tap targets can be read off.
+#                            --head N / --heads: <name>-head<N>.png per head
+#   heads                    one line per head: "<head> <w>x<h>" (a head that has
+#                            no scanout yet shows QEMU's 640x480 placeholder)
 #   find [TEXT] [--line]     OCR the screen -> "x,y<TAB>text" per match (word or
 #                            grouped line); pick a `tap` target (needs tesseract)
 #   tap-text "LABEL" [n] [btn]  OCR-locate a label (consecutive word run) and click it
@@ -76,7 +88,9 @@
 #   restore NAME             load a snapshot (HMP loadvm; needs the same devices)
 #   snapshots                list snapshots (HMP info snapshots)
 #   record start|stop|status  frame recorder (lib/vmkit/record.py) on qmp-rec.sock:
-#                            start [--fps N] [--out RUNDIR] -> prints the run dir
+#                            start [--fps N] [--out RUNDIR] [--heads all|0,1] -> prints the run dir
+#                            (--heads: one recorder per head, RUNDIR/head<N>/ each a full run dir,
+#                            RUNDIR/heads.json; all heads stamp the same host clock)
 #                            (frames.jsonl, frames/%06d.png, video.mkv, summary.json);
 #                            input actions meanwhile also go to <run>/actions.jsonl
 #   frames (--at T_NS | --action '#N'|STEP [--anchor send|ack]) --offset SPEC[,..]
@@ -115,6 +129,8 @@ NICE="${VMKIT_NICE:-19}"; IONICE="${VMKIT_IONICE:-3}"
 # Extra qemu arguments, appended last so they can override: --qemu-arg ARG
 # (repeatable, one argv element each) and/or VMKIT_QEMU_ARGS (split like a
 # shell would, by python shlex: quotes group, newlines separate).
+GPU_HEADS="${VMKIT_GPU_HEADS:-}"; GPU_RES="${VMKIT_GPU_RES:-}"; UEFI="${VMKIT_UEFI:-}"
+HEAD="${VMKIT_HEAD:-0}"; LAYOUT="${VMKIT_LAYOUT:-}"; ALLHEADS=""
 QEMU_EXTRA=()
 if [ -n "${VMKIT_QEMU_ARGS:-}" ]; then
     qa=$(python3 -c 'import shlex, sys; print(" ".join(map(shlex.quote, shlex.split(sys.argv[1]))))' "$VMKIT_QEMU_ARGS" 2>/dev/null) \
@@ -138,6 +154,11 @@ while [ $# -gt 0 ]; do
         --arch) ARCH="$2"; shift 2;;
         --accel) ACCEL="$2"; shift 2;;
         --nice) NICE="$2"; shift 2;;
+        --gpu-heads) GPU_HEADS="$2"; shift 2;;
+        --gpu-res) GPU_RES="$2"; shift 2;;
+        --uefi) UEFI=1; shift;;
+        --head) HEAD="$2"; HEAD_EXPLICIT=1; shift 2;;
+        --layout) LAYOUT="$2"; shift 2;;
         --qemu-arg) QEMU_EXTRA+=("$2"); shift 2;;
         --ionice) IONICE="$2"; shift 2;;
         --) shift; args+=("$@"); break;;
@@ -151,9 +172,10 @@ cmd="${1:-status}"; shift || true
 # One canonical spelling, so `up` and `down` agree on -pidfile (d, ./d, /abs/d).
 DIR="$(realpath -m "$DIR")"
 mkdir -p "$DIR"
+case "$HEAD" in ''|*[!0-9]*) echo "vmkit: --head must be a number, got '$HEAD'" >&2; exit 2;; esac
 QMP_SOCK="$DIR/qmp.sock"; QMP_REC_SOCK="$DIR/qmp-rec.sock"; SERIAL_LOG="$DIR/serial.log"; PIDFILE="$DIR/qemu.pid"
 KNOWN="$DIR/known_hosts"; VNCFILE="$DIR/vnc"
-REC_PID="$DIR/record.pid"; REC_RUN="$DIR/record.run"
+REC_PID="$DIR/record.pid"; REC_RUN="$DIR/record.run"; REC_PIDS="$DIR/record.pids"
 # Host-side python helpers (stdlib) live in <repo>/lib/vmkit.
 VMKIT_LIB="$(cd "$(dirname "$(readlink -f "$0")")/../lib" && pwd)"
 # Scratch for raw screendumps: tmpfs when available (a 1280x800 PPM is ~3 MB).
@@ -286,7 +308,16 @@ PY
 # stalls the guest's display (halves its frame rate); PPM is a memcpy. Callers
 # convert on the host when they need PNG. QEMU < 7.1 has no "format" argument
 # but writes PPM by default, so fall back to that.
-dump_ppm() {  # dump_ppm <out.ppm>
+# A head other than 0 needs the GPU device id and is range-checked first (QEMU
+# does not validate the index).
+dump_ppm() {  # dump_ppm <out.ppm> [head]
+    local h="${2:-$HEAD}"
+    if [ "$h" -gt 0 ]; then
+        local args
+        args=$(python3 "$VMKIT_LIB/vmkit/heads.py" dump-args "$DIR" "$1" "$h") || return 1
+        qmp "{\"execute\":\"screendump\",\"arguments\":$args}" >/dev/null
+        return
+    fi
     qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s","format":"ppm"}}' "$1")" >/dev/null 2>&1 \
         || qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s"}}' "$1")" >/dev/null
 }
@@ -315,7 +346,7 @@ print(json.dumps({"t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "cmd"
 # CLOCK_MONOTONIC (t_send before the first QMP write, t_ack after the last
 # reply) and appends it to actions.jsonl (and to the active recording's run
 # dir). Pointer pixels map to the abs axis using the live framebuffer size.
-act() { python3 "$VMKIT_LIB/vmkit/act.py" --dir "$DIR" --sock "$QMP_SOCK" --tmp "$TMPD" "$@"; }
+act() { python3 "$VMKIT_LIB/vmkit/act.py" --dir "$DIR" --sock "$QMP_SOCK" --tmp "$TMPD" --head "$HEAD" --layout "$LAYOUT" "$@"; }
 # stamped <name> <shown-args> <argv...>: run a subprocess (stdio inherited),
 # stamped and logged the same way.
 stamped() { local n="$1" shown="$2"; shift 2; python3 "$VMKIT_LIB/vmkit/act.py" --dir "$DIR" exec "$n" "$shown" -- "$@"; }
@@ -341,7 +372,7 @@ up)
     [ -n "$OVERLAY" ] && [ -f "$OVERLAY" ] || { echo "vmkit: --overlay PATH required (got '$OVERLAY')" >&2; exit 2; }
     if [ -S "$QMP_SOCK" ] && qmp '{"execute":"query-status"}' >/dev/null 2>&1; then
         echo "already up (qmp $QMP_SOCK, ssh $SSH_PORT)"; exit 0; fi
-    rm -f "$QMP_SOCK" "$QMP_REC_SOCK" "$VNCFILE"; : >"$SERIAL_LOG"
+    rm -f "$QMP_SOCK" "$QMP_REC_SOCK" "$DIR"/qmp-rec-h*.sock "$VNCFILE" "$DIR/gpu.json"; : >"$SERIAL_LOG"
     case "$VIEW" in
         none)      disp=(-display none);;
         gtk)       disp=(-display gtk,show-cursor=on);;
@@ -371,6 +402,31 @@ up)
             else echo "vmkit: no aarch64 UEFI firmware found (install edk2-aarch64/AAVMF)" >&2; exit 3; fi ;;
         *) machine=virt ;;
     esac
+    # Multi-head: one virtio GPU named gpu0 with N outputs. QEMU gives every
+    # output the same EDID mode (--gpu-res); per-head modes are set in the guest.
+    # A recorder-only QMP socket per extra head lets one recorder per head run in
+    # parallel (a QMP socket serves one client at a time).
+    recsocks=()
+    if [ -n "$GPU_HEADS$GPU_RES" ]; then
+        gh="${GPU_HEADS:-1}"; res="${GPU_RES:-1280x800}"
+        [[ "$gh" =~ ^[1-9][0-9]?$ ]] || { echo "vmkit: --gpu-heads must be 1..99, got '$gh'" >&2; exit 2; }
+        [[ "$res" =~ ^[0-9]+x[0-9]+$ ]] || { echo "vmkit: --gpu-res must be WxH, got '$res'" >&2; exit 2; }
+        case "$ARCH" in
+            x86_64|i386) gpu=(-vga none -device "virtio-vga,id=gpu0,max_outputs=$gh,xres=${res%x*},yres=${res#*x}");;
+            *)           gpu=(-device "virtio-gpu-pci,id=gpu0,max_outputs=$gh,xres=${res%x*},yres=${res#*x}");;
+        esac
+        printf '{"id":"gpu0","heads":%s,"res":"%s"}\n' "$gh" "$res" >"$DIR/gpu.json"
+        for ((i = 1; i < gh; i++)); do recsocks+=(-qmp "unix:$DIR/qmp-rec-h$i.sock,server,nowait"); done
+    fi
+    # UEFI on x86: OVMF code (readonly) + a per-VM vars copy that keeps the NVRAM
+    # (boot entries) between boots. aarch64 always uses UEFI, above.
+    if [ -n "$UEFI" ] && [ "$machine" = q35 ]; then
+        code=""; for c in /usr/share/edk2/x64/OVMF_CODE.4m.fd /usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd; do [ -f "$c" ] && { code="$c"; break; }; done
+        vars0=""; for v in /usr/share/edk2/x64/OVMF_VARS.4m.fd /usr/share/edk2-ovmf/x64/OVMF_VARS.4m.fd /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd /usr/share/edk2/ovmf/OVMF_VARS.fd; do [ -f "$v" ] && { vars0="$v"; break; }; done
+        [ -n "$code" ] && [ -n "$vars0" ] || { echo "vmkit: --uefi: no OVMF firmware found (install edk2-ovmf)" >&2; exit 3; }
+        [ -f "$DIR/efivars.fd" ] || cp "$vars0" "$DIR/efivars.fd"
+        fw=(-drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$DIR/efivars.fd")
+    fi
     add_ionice
     echo "== vmkit up: $(basename "$OVERLAY")  arch=$ARCH accel=$ACCEL  view=$VIEW  serial=$SERIAL_LOG  qmp=$QMP_SOCK  ssh=$SSH_PORT$([ -f "$VNCFILE" ] && echo "  vnc=127.0.0.1:$(cat "$VNCFILE")")"
     "${prio[@]}" "qemu-system-$ARCH" \
@@ -385,6 +441,7 @@ up)
         -serial file:"$SERIAL_LOG" \
         -qmp unix:"$QMP_SOCK",server,nowait \
         -qmp unix:"$QMP_REC_SOCK",server,nowait \
+        ${recsocks[@]+"${recsocks[@]}"} \
         -device virtio-tablet-pci "${usb[@]}" -device usb-kbd -audio none \
         -pidfile "$PIDFILE" \
         ${QEMU_EXTRA[@]+"${QEMU_EXTRA[@]}"} &
@@ -399,13 +456,31 @@ status)
     ;;
 shot)
     log_action shot "$@"
-    grid=""; name="shot"
-    for a in "$@"; do case "$a" in --grid) grid=1;; *) name="$a";; esac; done
-    out="$DIR/${name}.png"; ppm="$TMPD/vmkit-shot.$$.ppm"; rc=0
-    { dump_ppm "$ppm" && python3 "$VMKIT_LIB/vmkit/imageio.py" ppm2png "$ppm" "$out" >/dev/null; } || rc=$?
-    rm -f "$ppm"; [ "$rc" -eq 0 ] || exit "$rc"
-    if [ -n "$grid" ]; then out="$(grid_overlay "$out" "$DIR/${name}-grid.png")"; fi
-    echo "$out"
+    grid=""; name="shot"; allheads=""
+    for a in "$@"; do case "$a" in --grid) grid=1;; --heads) allheads=1;; *) name="$a";; esac; done
+    # --head N / --heads name the files <name>-head<N>.png; plain shot stays <name>.png
+    if [ -n "$allheads" ]; then
+        read -r _dev nheads < <(python3 "$VMKIT_LIB/vmkit/heads.py" info "$DIR")
+        hl=$(seq 0 $((nheads - 1)))
+    elif [ -n "${HEAD_EXPLICIT:-}" ]; then hl="$HEAD"; suffix=1
+    else hl=0; fi
+    [ -z "$allheads" ] || suffix=1
+    for h in $hl; do
+        n="$name"; [ -z "${suffix:-}" ] || n="${name}-head${h}"
+        out="$DIR/${n}.png"; ppm="$TMPD/vmkit-shot.$$.ppm"; rc=0
+        { dump_ppm "$ppm" "$h" && python3 "$VMKIT_LIB/vmkit/imageio.py" ppm2png "$ppm" "$out" >/dev/null; } || rc=$?
+        rm -f "$ppm"; [ "$rc" -eq 0 ] || exit "$rc"
+        if [ -n "$grid" ]; then out="$(grid_overlay "$out" "$DIR/${n}-grid.png")"; fi
+        echo "$out"
+    done
+    ;;
+heads)
+    read -r _dev nheads < <(python3 "$VMKIT_LIB/vmkit/heads.py" info "$DIR")
+    for ((h = 0; h < nheads; h++)); do
+        ppm="$TMPD/vmkit-heads.$$.ppm"
+        dump_ppm "$ppm" "$h" || { rm -f "$ppm"; echo "$h error"; continue; }
+        echo "$h $(python3 "$VMKIT_LIB/vmkit/imageio.py" size "$ppm" | tr ' ' x)"; rm -f "$ppm"
+    done
     ;;
 find)
     # OCR the screen -> "cx,cy<TAB>text". `find "Shut Down"` filters (case-
@@ -491,16 +566,45 @@ record)
     case "$sub" in
     start)
         # record start [--fps N] [--out RUNDIR] [--degraded-ms MS]
-        fps="${VMKIT_REC_FPS:-30}"; out=""; dms="${VMKIT_REC_DEGRADED_MS:-50}"
+        fps="${VMKIT_REC_FPS:-30}"; out=""; dms="${VMKIT_REC_DEGRADED_MS:-50}"; hspec=""
         while [ $# -gt 0 ]; do case "$1" in
             --fps) fps="$2"; shift 2;; --out) out="$2"; shift 2;; --degraded-ms) dms="$2"; shift 2;;
-            *) echo "usage: vmkit record start [--fps N] [--out RUNDIR] [--degraded-ms MS]" >&2; exit 2;; esac; done
+            --heads) hspec="${2:-all}"; shift 2;;
+            *) echo "usage: vmkit record start [--fps N] [--out RUNDIR] [--degraded-ms MS] [--heads all|0,1,..]" >&2; exit 2;; esac; done
         rec_alive && { echo "vmkit record: already recording to $(cat "$REC_RUN") (pid $(cat "$REC_PID"))" >&2; exit 1; }
         [ -S "$QMP_REC_SOCK" ] || { echo "vmkit record: no $QMP_REC_SOCK (VM not up, or booted by a vmkit without the recorder socket)" >&2; exit 1; }
         command -v ffmpeg >/dev/null || { echo "vmkit record: needs ffmpeg" >&2; exit 3; }
         [ -n "$out" ] || out="$DIR/runs/$(date -u +%Y%m%dT%H%M%SZ)"
         mkdir -p "$out"; out="$(cd "$out" && pwd)"
-        [ -e "$out/frames.jsonl" ] && { echo "vmkit record: $out already has a recording" >&2; exit 1; }
+        [ -e "$out/frames.jsonl" ] || [ -e "$out/heads.json" ] && { echo "vmkit record: $out already has a recording" >&2; exit 1; }
+        if [ -n "$hspec" ]; then
+            # One recorder per head (own QMP socket, own run dir), all on the host clock.
+            hdev=$(python3 "$VMKIT_LIB/vmkit/heads.py" head-list "$DIR" "$hspec") || exit 2
+            read -r gdev gheads < <(python3 "$VMKIT_LIB/vmkit/heads.py" info "$DIR")
+            [ "$gdev" != - ] || { echo "vmkit record: --heads needs the GPU device id (vmkit up --gpu-heads, or VMKIT_GPU_ID)" >&2; exit 2; }
+            add_ionice
+            python3 "$VMKIT_LIB/vmkit/heads.py" write-heads "$out" "$gdev" "$fps" $hdev
+            : >"$REC_PIDS"
+            for h in $hdev; do
+                sock="$QMP_REC_SOCK"; [ "$h" -eq 0 ] || sock="$DIR/qmp-rec-h$h.sock"
+                [ -S "$sock" ] || { echo "vmkit record: no $sock (VM not booted with --gpu-heads $gheads by this vmkit)" >&2
+                    while read -r p d; do kill -TERM "$p" 2>/dev/null || :; done <"$REC_PIDS"; rm -f "$REC_PIDS" "$out/heads.json"; exit 1; }
+                mkdir -p "$out/head$h"
+                setsid "${prio[@]}" python3 "$(dirname "$VMKIT_LIB")/bin/vmkit-record" --sock "$sock" \
+                    --device "$gdev" --head "$h" --run "$out/head$h" --fps "$fps" --degraded-ms "$dms" \
+                    >>"$out/head$h/recorder.out" 2>&1 </dev/null &
+                echo "$! $out/head$h" >>"$REC_PIDS"
+            done
+            head -n1 "$REC_PIDS" | cut -d' ' -f1 >"$REC_PID"; echo "$out" >"$REC_RUN"
+            i=0
+            for h in $hdev; do
+                while ! [ -s "$out/head$h/frames.jsonl" ]; do
+                    [ "$i" -lt 150 ] || { echo "vmkit record: head $h gave no frame after 15 s; stopping (see $out/head$h/recorder.log)" >&2
+                        while read -r p d; do kill -TERM "$p" 2>/dev/null || :; done <"$REC_PIDS"; rm -f "$REC_PID" "$REC_RUN" "$REC_PIDS"; exit 1; }
+                    sleep 0.1 2>/dev/null || :; i=$((i+1)); done
+            done
+            echo "$out"; exit 0
+        fi
         # Own session + stdio to a file: a backgrounded child holding our stdout
         # would block a caller reading it (same footgun as `up`).
         add_ionice
@@ -535,6 +639,39 @@ record)
         [[ "$to" =~ ^([0-9]+)(\.([0-9]+))?$ ]] || {
             echo "vmkit record: VMKIT_REC_STOP_TIMEOUT must be seconds (e.g. 30 or 2.5), got '$to'" >&2; exit 2; }
         frac="${BASH_REMATCH[3]:-0}"; ticks=$((10#${BASH_REMATCH[1]} * 10 + 10#${frac:0:1}))
+        if [ -f "$REC_PIDS" ]; then   # multi-head: TERM every head's recorder, then wait / KILL each
+            out=$(cat "$REC_RUN" 2>/dev/null); rc=0; any=""
+            while read -r p d; do pid_running "$p" && { kill -TERM "$p" 2>/dev/null || :; any=1; }; done <"$REC_PIDS"
+            [ -n "$any" ] || { rm -f "$REC_PID" "$REC_RUN" "$REC_PIDS"; echo "vmkit record: not recording" >&2; exit 1; }
+            i=0; while [ "$i" -lt "$ticks" ]; do
+                alive=""; while read -r p d; do pid_running "$p" && alive=1; done <"$REC_PIDS"
+                [ -n "$alive" ] || break; sleep 0.1 2>/dev/null || :; i=$((i+1)); done
+            while read -r p d; do
+                if pid_running "$p"; then
+                    echo "vmkit record: recorder pid $p ($d) ignored SIGTERM for $to s; killed it and its ffmpeg" >&2
+                    kill -KILL -- "-$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null || :
+                    j=0; while pid_running "$p" && [ "$j" -lt 50 ]; do sleep 0.1 2>/dev/null || :; j=$((j+1)); done
+                    python3 "$(dirname "$VMKIT_LIB")/bin/vmkit-record" --run "$d" \
+                        --mark-killed "killed by record stop: no exit $to s after SIGTERM" || :
+                fi
+            done <"$REC_PIDS"
+            echo "$out"
+            while read -r p d; do
+                if [ -f "$d/summary.json" ]; then
+                    printf 'head %s: ' "${d##*head}"
+                    python3 - "$d/summary.json" <<'PY' || rc=1
+import json, sys
+S = json.load(open(sys.argv[1])); iv = S["interval_ms"]; c = S["screendump_call_ms"]
+print(f"frames {S['frames']}  fps {S['fps']} (target {S['target_fps']})  interval p50 {iv['p50']} "
+      f"p95 {iv['p95']} max {iv['max']} ms  screendump p95 {c['p95']} ms  inactive {S['inactive_frames']}  "
+      f"degraded={str(S['degraded']).lower()}" + (f"  ERROR {S['error']}" if S.get("error") else ""))
+sys.exit(1 if S.get("error") else 0)
+PY
+                else echo "head ${d##*head}: no summary.json; see $d/recorder.log"; rc=1; fi
+            done <"$REC_PIDS"
+            rm -f "$REC_PID" "$REC_RUN" "$REC_PIDS"
+            exit "$rc"
+        fi
         rec_alive || { rm -f "$REC_PID" "$REC_RUN"; echo "vmkit record: not recording" >&2; exit 1; }
         p=$(cat "$REC_PID"); out=$(cat "$REC_RUN")
         kill -TERM "$p" 2>/dev/null || :
@@ -560,10 +697,14 @@ sys.exit(1 if S.get("error") else 0)
 PY
         ;;
     status)
-        if rec_alive; then
+        if [ -f "$REC_PIDS" ] && rec_alive; then
+            out=$(cat "$REC_RUN" 2>/dev/null)
+            echo "recording: run $out (heads)"
+            while read -r p d; do echo "  head ${d##*head}: pid $p  frames $(wc -l <"$d/frames.jsonl" 2>/dev/null || echo 0)"; done <"$REC_PIDS"
+        elif rec_alive; then
             out=$(cat "$REC_RUN" 2>/dev/null)
             echo "recording: pid $(cat "$REC_PID")  run $out  frames $(wc -l <"$out/frames.jsonl" 2>/dev/null || echo 0)"
-        else echo "not recording"; [ -f "$REC_PID" ] && rm -f "$REC_PID" "$REC_RUN"; exit 1; fi
+        else echo "not recording"; [ -f "$REC_PID" ] && rm -f "$REC_PID" "$REC_RUN" "$REC_PIDS"; exit 1; fi
         ;;
     *) echo "usage: vmkit record start|stop|status" >&2; exit 2;;
     esac

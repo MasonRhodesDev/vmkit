@@ -126,7 +126,7 @@ def main_single(a):
             res = C.run_check(a.kind, a.frame, spec, a.baseline, os.getcwd())
             res.update(check=a.kind, frame=a.frame)
     else:
-        run = a.run or T.default_run(a.dir)
+        run = T.head_run(a.run) if a.run else T.default_run(a.dir)
         spec["at"] = a.offset or "+0ms"
         if a.mode:
             spec["mode"] = a.mode
@@ -147,7 +147,7 @@ def main_batch(argv):
     ap.add_argument("expect")
     ap.add_argument("-o", "--out")
     a = ap.parse_args(argv)
-    run = a.run or T.default_run(a.dir)
+    run = T.head_run(a.run) if a.run else T.default_run(a.dir)
     with open(a.expect) as f:
         exps = json.load(f)
     if isinstance(exps, dict):

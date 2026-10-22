@@ -20,6 +20,11 @@ How it works (numbers from the 2026-09-30 recording spike):
   * A resolution change closes the encoder segment and starts a new one
     (video-001.mkv, ...); PNG numbering continues at n.
 
+Multi-head: one recorder (this module) per head, each with --device/--head and its
+own run dir; `vmkit record start --heads` starts them together under one parent dir
+with a heads.json. Every head stamps frames on the same host CLOCK_MONOTONIC, so
+frames of different heads line up by `t`.
+
 Outputs in the run dir:
   frames.jsonl    {"n", "t_req", "t", "inactive"} per frame (ns, CLOCK_MONOTONIC)
   gaps.jsonl      {"t_from", "t_to", "errors", "reason"} per run of screendump
@@ -62,6 +67,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from vmkit.qmp import QMP, QMPClosed, QMPError  # noqa: E402
 from vmkit.imageio import _ppm_header  # noqa: E402
+from vmkit import heads as _heads  # noqa: E402
 
 now = time.monotonic_ns
 
@@ -227,7 +233,7 @@ class Recorder:
             while not self.stop.is_set():
                 t_req = now()
                 try:
-                    qmp.cmd("screendump", {"filename": shm, "format": "ppm"})
+                    qmp.cmd("screendump", _heads.screendump_args(shm, getattr(a, "device", None), getattr(a, "head", 0)))
                 except QMPClosed as e:
                     if not self.stop.is_set():
                         self.fail(f"screendump: {e}")
@@ -437,6 +443,9 @@ def main(argv=None):
     ap.add_argument("--sock", help="recorder QMP socket (qmp-rec.sock); required to record")
     ap.add_argument("--run", required=True, help="run dir (created)")
     ap.add_argument("--fps", type=float, default=30.0)
+    ap.add_argument("--device", help="QOM id of the graphics device to dump (default: the primary console)")
+    ap.add_argument("--head", type=int, default=0,
+                    help="output index on --device (needs --device); one recorder per head, see `vmkit record start --heads`")
     ap.add_argument("--shm", default="/dev/shm" if os.access("/dev/shm", os.W_OK) else None,
                     help="scratch dir for the PPM (tmpfs)")
     ap.add_argument("--ffmpeg", default=shutil.which("ffmpeg") or "ffmpeg")
@@ -459,6 +468,8 @@ def main(argv=None):
         return 0
     if not a.sock:
         ap.error("--sock is required")
+    if a.head and not a.device:
+        ap.error("--head needs --device")
     os.makedirs(a.run, exist_ok=True)
     a.shm = a.shm or a.run
     R = Recorder(a)

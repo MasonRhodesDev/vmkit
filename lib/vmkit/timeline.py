@@ -186,19 +186,34 @@ def anchor_of(action, anchor="send"):
     return action[key]
 
 
+def head_run(run, head=0):
+    """A multi-head recording's parent dir (heads.json) -> head N's run dir; any
+    other dir is returned as it is."""
+    try:
+        with open(os.path.join(run, "heads.json")) as f:
+            hs = json.load(f)["heads"]
+    except (OSError, ValueError, KeyError):
+        return run
+    for h in hs:
+        if h["head"] == head:
+            return os.path.join(run, h["run"])
+    raise TimelineError(f"{run} has no head {head} (recorded: {[h['head'] for h in hs]})")
+
+
 def default_run(vmkit_dir):
     try:
         run = open(os.path.join(vmkit_dir, "record.run")).read().strip()
         if run:
-            return run
+            return head_run(run)
     except OSError:
         pass
     runs = os.path.join(vmkit_dir, "runs")
     cands = sorted(d for d in (os.listdir(runs) if os.path.isdir(runs) else [])
-                   if os.path.exists(os.path.join(runs, d, "frames.jsonl")))
+                   if os.path.exists(os.path.join(runs, d, "frames.jsonl"))
+                   or os.path.exists(os.path.join(runs, d, "heads.json")))
     if not cands:
         raise TimelineError(f"no recording under {runs}; pass --run")
-    return os.path.join(runs, cands[-1])
+    return head_run(os.path.join(runs, cands[-1]))
 
 
 def main(argv):
@@ -216,7 +231,7 @@ def main(argv):
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     try:
-        run = a.run or default_run(a.dir)
+        run = head_run(a.run) if a.run else default_run(a.dir)
         frames = load_frames(run)
         anchor = a.at if a.at is not None else anchor_of(find_action(load_actions(run), a.action), a.anchor)
         rows = []
