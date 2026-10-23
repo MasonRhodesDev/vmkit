@@ -257,7 +257,7 @@ def main(argv=None):
     ap.add_argument("-o", "--out")
     a = ap.parse_args(argv)
     try:
-        run = a.run or T.default_run(a.dir)
+        run = T.head_run(a.run) if a.run else T.default_run(a.dir)
         print(write_report(run, a.results, a.out))
     except (OSError, ValueError, T.TimelineError) as e:
         print(f"vmkit report: {e}", file=sys.stderr)

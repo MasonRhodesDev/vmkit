@@ -19,7 +19,11 @@ dir), to <run>/actions.jsonl as well. Fields:
   step     $VMKIT_STEP when set (lets a runner label its steps)
   x, y     pointer target, when there is one
 
-Usage: act.py --dir DIR --sock QMP_SOCK [--tmp TMPD] OP ARGS...
+Multi-head: with --layout SPEC (see vmkit/heads.py) pointer pixels are in head
+--head N's compositor space and map onto the bounding box of all heads; the
+record gains "head". Without --layout the pointer maps over the one framebuffer.
+
+Usage: act.py --dir DIR --sock QMP_SOCK [--tmp TMPD] [--head N] [--layout SPEC] OP ARGS...
        act.py --dir DIR exec NAME DISPLAY_ARGS -- ARGV...   (subprocess, stdio inherited)
 """
 import json
@@ -31,6 +35,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from vmkit.qmp import QMP, QMPError  # noqa: E402
 from vmkit import imageio  # noqa: E402
+from vmkit import heads as H  # noqa: E402
 
 now = time.monotonic_ns
 
@@ -51,9 +56,16 @@ def wall():
 def log_paths(d):
     paths = [os.path.join(d, "actions.jsonl")]
     try:
-        run = open(os.path.join(d, "record.run")).read().strip()
+        with open(os.path.join(d, "record.run")) as f:
+            run = f.read().strip()
         if run and os.path.isdir(run):
             paths.append(os.path.join(run, "actions.jsonl"))
+            try:        # a multi-head recording: every head's run dir gets the action
+                with open(os.path.join(run, "heads.json")) as f:
+                    for h in json.load(f)["heads"]:
+                        paths.append(os.path.join(run, h["run"], "actions.jsonl"))
+            except (OSError, ValueError, KeyError):
+                pass
     except OSError:
         pass
     return paths
@@ -88,8 +100,9 @@ def fb_size(q, tmp):
 
 
 class Actor:
-    def __init__(self, q, size=None):
+    def __init__(self, q, size=None, head=0, layout=None):
         self.q, self.size, self.t_send = q, size, None
+        self.head, self.layout = head, layout
 
     def _cmd(self, name, args):
         if self.t_send is None:
@@ -103,9 +116,13 @@ class Actor:
         return max(0, min(32767, round(int(v) / max(1, n - 1) * 32767)))
 
     def moveto(self, x, y):
-        W, H = self.size
-        self.ev([{"type": "abs", "data": {"axis": "x", "value": self.ax(x, W)}},
-                 {"type": "abs", "data": {"axis": "y", "value": self.ax(y, H)}}])
+        if self.layout:
+            vx, vy = H.pointer_abs(self.layout, self.head, int(x), int(y))
+        else:
+            W, Hh = self.size
+            vx, vy = self.ax(x, W), self.ax(y, Hh)
+        self.ev([{"type": "abs", "data": {"axis": "x", "value": vx}},
+                 {"type": "abs", "data": {"axis": "y", "value": vy}}])
 
     def button(self, btn):
         self.ev([{"type": "btn", "data": {"down": True, "button": btn}}])
@@ -125,7 +142,7 @@ TYPE_GAP = float(os.environ.get("VMKIT_TYPE_GAP_MS", "40")) / 1000
 NEEDS_SIZE = {"move", "tap", "tap-text", "drag"}
 
 
-def run_qmp(op, a, sock, tmp):
+def run_qmp(op, a, sock, tmp, head=0, layout=None):
     """Perform op; returns (record fields, stdout message)."""
     try:
         q = QMP(sock)
@@ -133,10 +150,10 @@ def run_qmp(op, a, sock, tmp):
         t = now()
         return {"t_send": t, "t_ack": t, "ok": False, "error": str(e)}, None
     try:
-        A = Actor(q)
+        A = Actor(q, head=head, layout=layout)
         rec, msg = {}, ""
         try:
-            if op in NEEDS_SIZE:
+            if op in NEEDS_SIZE and not layout:
                 A.size = fb_size(q, tmp)
             if op == "move":
                 A.moveto(a[0], a[1]); rec.update(x=int(a[0]), y=int(a[1])); msg = f"move {a[0]},{a[1]}"
@@ -185,7 +202,7 @@ def run_qmp(op, a, sock, tmp):
                 raise ValueError(f"unknown action {op}")
             t_ack = now()
             return dict(rec, t_send=A.t_send or t_ack, t_ack=t_ack, ok=True), msg
-        except (QMPError, ValueError, OSError) as e:
+        except (QMPError, ValueError, OSError, H.HeadError) as e:
             t = now()
             return dict(rec, t_send=A.t_send or t, t_ack=t, ok=False, error=str(e)), None
     finally:
@@ -193,13 +210,15 @@ def run_qmp(op, a, sock, tmp):
 
 
 def main(argv):
-    d = sock = shown_override = None; tmp = "/dev/shm" if os.access("/dev/shm", os.W_OK) else None
+    d = sock = shown_override = layout = None; head = 0; tmp = "/dev/shm" if os.access("/dev/shm", os.W_OK) else None
     while argv and argv[0].startswith("--"):
         k, v = argv[0], argv[1]; argv = argv[2:]
         if k == "--dir": d = v
         elif k == "--sock": sock = v
         elif k == "--tmp": tmp = v
         elif k == "--shown": shown_override = v
+        elif k == "--head": head = int(v)
+        elif k == "--layout": layout = H.parse_layout(v) if v else None
         else: sys.exit(f"act.py: unknown option {k}")
     tmp = tmp or d
     op, a = argv[0], argv[1:]
@@ -220,8 +239,13 @@ def main(argv):
         log(d, rec)
         return rc
     shown = shown_override or (" ".join(a) if op != "type" else f"({len(' '.join(a))} chars)")
-    fields, msg = run_qmp(op, a, sock, tmp)
+    if head and not layout:
+        print("vmkit: --head needs a layout (--layout or VMKIT_LAYOUT) to place the pointer", file=sys.stderr)
+        return 2
+    fields, msg = run_qmp(op, a, sock, tmp, head, layout)
     rec = {"t": wall(), "cmd": op, "args": shown}
+    if layout:
+        rec["head"] = head
     rec.update(fields)
     log(d, rec)
     if not rec["ok"]:
