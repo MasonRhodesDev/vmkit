@@ -169,6 +169,13 @@ class MultiHeadCLI(unittest.TestCase):
         self.assertEqual([os.path.basename(x) for x in r.stdout.split()], ["s-head0.png", "s-head1.png", "s-head2.png"])
         self.assertEqual([d.get("head", 0) for d in self.dumps()], [0, 1, 2])
 
+    def test_shot_names_the_file_for_vmkit_head_like_for_dash_dash_head(self):
+        self.qmp(); self.gpu()
+        r = self.vmkit("shot", "e", env={"VMKIT_HEAD": "1"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(r.stdout.strip().endswith("/e-head1.png"))
+        self.assertEqual(self.dumps()[0]["head"], 1)
+
     def test_plain_shot_is_unchanged(self):
         self.qmp(); self.gpu()
         r = self.vmkit("shot", "p")
@@ -277,6 +284,23 @@ class MultiHeadCLI(unittest.TestCase):
         r = self.vmkit("frames", "--run", os.path.join(run, "head1"), "--action", "#0", "--offset", "+100ms", "--json")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("/head1/", r.stdout)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+    def test_plain_record_start_records_the_chosen_head(self):
+        self.gpu(2)
+        s0 = FakeQMP(os.path.join(self.dir, "qmp-rec.sock"), size=(64, 48))
+        s1 = FakeQMP(os.path.join(self.dir, "qmp-rec-h1.sock"), size=(32, 24))
+        self.addCleanup(s0.stop); self.addCleanup(s1.stop)
+        run = os.path.join(self.td, "run")
+        r = self.vmkit("record", "start", "--fps", "10", "--out", run, env={"VMKIT_HEAD": "1"}, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        time.sleep(0.5)
+        r = self.vmkit("record", "stop", timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(run, "head1", "frames.jsonl")))
+        self.assertFalse(os.path.exists(os.path.join(run, "head0")))
+        self.assertTrue([a for ex, a in s1.requests if ex == "screendump" and a.get("head") == 1])
+        self.assertFalse([1 for ex, a in s0.requests if ex == "screendump"])
 
     def test_record_heads_bad_head_is_refused(self):
         self.gpu(2)
