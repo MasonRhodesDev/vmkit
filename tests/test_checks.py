@@ -15,6 +15,15 @@ from vmkit import imageio as I
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HAVE_MAGICK = shutil.which("magick") is not None
 HAVE_TESS = shutil.which("tesseract") is not None
+OCR_FONT = "DejaVu-Sans-Mono"
+
+
+def have_font(name):
+    """ImageMagick can draw with this font (`magick -list font` names it)."""
+    if not HAVE_MAGICK:
+        return False
+    out = subprocess.run(["magick", "-list", "font"], capture_output=True, text=True).stdout
+    return any(l.strip() == "Font: " + name for l in out.splitlines())
 
 
 def solid(w, h, rgb):
@@ -206,9 +215,11 @@ class Changed(Tmp):
 
 @unittest.skipUnless(HAVE_MAGICK and HAVE_TESS, "needs magick + tesseract")
 class OCR(Tmp):
+    @unittest.skipUnless(have_font(OCR_FONT), "needs the DejaVu Sans Mono font known to ImageMagick "
+                         "(e.g. ttf-dejavu / fonts-dejavu-core; see `magick -list font`)")
     def test_text_and_regex(self):
         p = os.path.join(self.td, "t.png")
-        subprocess.run(["magick", "-size", "500x120", "xc:#202020", "-font", "DejaVu-Sans-Mono", "-pointsize", "28",
+        subprocess.run(["magick", "-size", "500x120", "xc:#202020", "-font", OCR_FONT, "-pointsize", "28",
                         "-fill", "#e0e0e0", "-annotate", "+20+50", "hello vmkit 42", "-annotate", "+20+100",
                         "second line", p], check=True)
         self.assertTrue(C.ocr(p, None, text="Hello  VMKIT")[0])

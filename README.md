@@ -41,6 +41,10 @@ vision/input/serial (that's the point — it's guest-OS-agnostic).
 | `ffmpeg` (+ `ffprobe`) | `record` (PNG sequence + ffv1 video; ffprobe checks the packet count) | `record start` exits 3 |
 | `tesseract`, ImageMagick | `check ocr`, `check template` (and PNG decoding speed in `check`) | those checks report an error; `pixel`/`changed` fall back to pure-Python decoding |
 
+The OCR test (`tests.test_checks.OCR`) draws its text with the DejaVu Sans Mono font (`ttf-dejavu` /
+`fonts-dejavu-core` / `dejavu-sans-mono-fonts`); without it ImageMagick does not list `DejaVu-Sans-Mono`
+and that test is skipped with the reason.
+
 Arch: `pacman -S qemu-full python openssh imagemagick tesseract tesseract-data-eng virt-viewer`.
 Debian/Ubuntu: `apt install qemu-system-x86 python3 openssh-client imagemagick tesseract-ocr virt-viewer`.
 Fedora: `dnf install qemu-system-x86 python3 openssh-clients ImageMagick tesseract virt-viewer`.
@@ -173,7 +177,7 @@ One virtio GPU with several outputs, each captured and addressed on its own.
 V="bin/vmkit --overlay ~/vms/mybox/disk.qcow2"
 $V --gpu-heads 3 --gpu-res 1920x1080 --uefi up   # one virtio GPU "gpu0", 3 outputs; OVMF instead of SeaBIOS
 $V heads                                         # "0 1920x1080", "1 640x480", ...: a head with no scanout shows QEMU's 640x480 placeholder
-$V shot --heads now                              # <dir>/now-head0.png, now-head1.png, ...   (--head N for one)
+$V shot --heads now                              # <dir>/now-head0.png, now-head1.png, ...   (--head N or VMKIT_HEAD for one)
 $V find --head 1 'Login'                         # OCR one head; tap-text --head N works the same
 $V record start --fps 10 --heads all             # one recorder per head, RUN/head0/, RUN/head1/, ..., RUN/heads.json
 $V record stop                                   # one summary line per head
@@ -195,12 +199,19 @@ $V frames --run RUN/head1 --action '#0' --offset +100ms     # any run command ta
   `actions.jsonl`. At 30 fps, 4K and ultrawide heads together are heavy (PPM memcpy plus PNG and ffv1 encoding
   per head): use `--fps 5` to `10` for a boot recording. Without `--degraded-ms` the degraded threshold is
   1.5 frame periods below 20 fps (50 ms at 30 fps), so a slow, steady rate is not "degraded".
+- `--head N` and `VMKIT_HEAD` are the same thing everywhere. `shot` names its file `<name>-head<N>.png` whenever
+  a head is chosen either way (even head 0), and plain `<name>.png` when none is. A plain `record start`
+  with a nonzero head records that head, as `--heads N` would, so the frames are in `RUN/head<N>/`, not
+  `RUN/frames.jsonl`. With head 0 (or none) it records head 0 straight into `RUN/`.
+- `up` waits for each extra head's control socket and retries sizing it; if a head still cannot be enabled it
+  says so, exits non-zero (QEMU stays up) and names the `vmkit heads set N WxH` that retries it.
 - Pointer: the tablet's absolute axes span the compositor's whole layout. `--layout "X,Y,W,H;X,Y,W,H;..."`
   (or `VMKIT_LAYOUT`) lists the heads' rectangles in the compositor's coordinates, in head order, and then
   `move/tap/click/drag --head N X Y` takes pixels in head N's compositor space (what `hyprctl monitors`
   reports: size after scale and rotation). With a layout and no `--head`, pixels are head 0's. For a rotated
   head the recorded frame is the physical scanout, not the compositor's view, so map frame pixels to compositor
-  pixels yourself (see lib/vmkit/heads.py).
+  pixels yourself (see lib/vmkit/heads.py). Pointer pixels are compositor (logical) pixels, but `shot` and
+  OCR coordinates are physical: at scale 1.5 divide a screenshot coordinate by 1.5 before `move/tap`.
 
 ## Scope and non-goals
 
