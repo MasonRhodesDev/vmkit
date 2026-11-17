@@ -1,19 +1,3 @@
-"""Write report.html for a recording run dir.
-
-Inputs (all in the run dir): frames.jsonl, frames/, actions.jsonl,
-summary.json (from the recorder), segments.jsonl, and optionally a results
-JSON (default results.json, as written by `vmkit check batch`).
-
-The page is plain HTML with inline CSS and no scripts or external assets; it
-references the run's own frames/*.png and video*.mkv by relative path, so keep
-it in the run dir. Per action it shows a contact sheet: the last frame before
-t_send, then the first frames at or after +0/+50/+100/+200/+400/+800 ms (and
-every frame a check used), with each check's region outlined in its status
-color. At the top: the pass/fail summary, the recorder's fps/interval numbers
-and the degraded flag, and the video links.
-
-CLI: report.py RUN [--results FILE] [-o OUT]   (vmkit report [RUN] ...)
-"""
 import argparse
 import html
 import json
@@ -69,7 +53,6 @@ def frame_size(run, n, cache={}):
 
 
 def thumb(run, f, anchor, label, rects, used=False):
-    """One contact-sheet cell. rects: [(x, y, w, h, color, title)]."""
     rel = f"frames/{f['n']:06d}.png"
     wh = frame_size(run, f["n"])
     svg = ""
@@ -87,7 +70,6 @@ def thumb(run, f, anchor, label, rects, used=False):
 
 
 def result_rects(r):
-    """Regions a result checked (and a template's match box)."""
     out = []
     color = COLORS.get(r.get("status"), COLORS[None])
     title = f"{r.get('id') or r.get('check')}: {r.get('status')}"

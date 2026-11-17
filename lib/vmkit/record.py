@@ -71,17 +71,11 @@ from vmkit import heads as _heads  # noqa: E402
 
 now = time.monotonic_ns
 
-FONT_W, FONT_H = 8, 16          # QEMU vgafont16 cell (ui/console.c placeholder)
-PLACEHOLDER_FG = 0xAA           # QEMU_PIXMAN_COLOR_GRAY; background is black
+FONT_W, FONT_H = 8, 16
+PLACEHOLDER_FG = 0xAA
 
 
 def is_placeholder(buf, off, w, h):
-    """True if the RGB frame at buf[off:] is QEMU's placeholder surface: black,
-    with one line of gray (0xaa) vgafont text on the centered text row.
-
-    QEMU draws it with qemu_create_placeholder_surface(): row
-    (h/16 - 1)/2, column (w/8 - len)/2, fg gray, bg black, at the previous
-    surface's resolution. Only C-speed bytes operations here (30 fps path)."""
     stride = w * 3
     if w < FONT_W or h < FONT_H:
         return False
@@ -101,7 +95,6 @@ def is_placeholder(buf, off, w, h):
         if i >= 0:
             first = min(first, i // 3)
             last = max(last, row.rfind(b"\xaa") // 3)
-    # centered text: margins equal within a glyph cell or two
     return abs(first - (w - 1 - last)) <= 2 * FONT_W
 
 
@@ -114,8 +107,6 @@ def pct(sorted_vals, p):
 
 
 class Encoder:
-    """One ffmpeg child per resolution segment."""
-
     def __init__(self, run, fps, ffmpeg, log):
         self.run, self.fps, self.ffmpeg, self.log = run, fps, ffmpeg, log
         self.proc = None; self.wh = None; self.seg = -1; self.segments = []
@@ -144,12 +135,12 @@ class Encoder:
             self.log(f"resolution change at n={first_n}: {w}x{h}; new encoder segment {video}")
 
     def write(self, view):
-        self.proc.stdin.write(view)       # BufferedWriter loops over partial writes
+        self.proc.stdin.write(view)
 
     def close(self):
         if self.proc is None:
             return
-        p = self.proc      # kept until it has exited, so kill() can reach a stalled one
+        p = self.proc
         try:
             p.stdin.close()
         except BrokenPipeError:
@@ -188,7 +179,6 @@ class Recorder:
         self.stop.set()
 
     def drain_left(self):
-        """Seconds left for the encoder to drain, counted from the first time it is asked after stop."""
         if self.drain_by is None:
             self.drain_by = time.monotonic() + self.a.drain_s
         return max(0.0, self.drain_by - time.monotonic())
@@ -204,9 +194,9 @@ class Recorder:
                     self.enc.start(w, h, n)
                 self.enc.write(memoryview(buf)[off:off + w * h * 3])
             self.enc.close()
-        except Exception as e:   # BrokenPipe, ffmpeg exit, ...
+        except Exception as e:
             self.fail(f"encoder: {e}")
-            try:                 # unblock the capture loop
+            try:
                 while True:
                     self.q.get_nowait()
             except queue.Empty:
@@ -223,7 +213,7 @@ class Recorder:
             return None if self.stop.is_set() else self.fail(f"qmp: {e}")
         frames = open(os.path.join(self.run, "frames.jsonl"), "a", buffering=1)
         n = 0; t_next = now(); prev_t = None; was_inactive = False; consec = 0
-        gap = None      # the open run of errors: {"t_from", "errors", "reason"}
+        gap = None
 
         def end_gap(t_to):
             with open(os.path.join(self.run, "gaps.jsonl"), "a") as g:
@@ -238,7 +228,7 @@ class Recorder:
                     if not self.stop.is_set():
                         self.fail(f"screendump: {e}")
                     break
-                except QMPError as e:   # an error reply (e.g. no surface mid mode-switch): a gap
+                except QMPError as e:
                     if self.stop.is_set():
                         break
                     self.errors += 1; consec += 1
@@ -251,7 +241,7 @@ class Recorder:
                     self.stop.wait(period / 1e9)
                     t_next = now()
                     continue
-                except OSError as e:    # timeout: a late reply would desync the stream
+                except OSError as e:
                     if not self.stop.is_set():
                         self.fail(f"screendump: {e}")
                     break
@@ -282,7 +272,7 @@ class Recorder:
                     self.log(f"gap n={n} interval={(t - prev_t) / 1e6:.1f}ms call={(t - t_req) / 1e6:.1f}ms")
                 prev_t = t
                 tp = now()
-                while self.error is None:   # enqueue even when stopping: frames.jsonl has the line
+                while self.error is None:
                     try:
                         self.q.put((n, w, h, buf, off), timeout=0.5)
                         break
@@ -297,7 +287,6 @@ class Recorder:
                 if self.error or self.stalled:
                     break
                 n += 1
-                # absolute schedule; after a stall, re-anchor instead of bursting
                 t_next += period
                 late = now() - t_next
                 if late > period:
@@ -315,7 +304,6 @@ class Recorder:
                 pass
 
     def verify(self, n):
-        """PNG count == frames.jsonl lines == video packets (per segment)."""
         out = {"frames": n}
         pngs = sum(1 for f in os.listdir(os.path.join(self.run, "frames")) if f.endswith(".png"))
         out["pngs"] = pngs
@@ -369,7 +357,7 @@ class Recorder:
         wt.start()
         try:
             self.capture()
-        except Exception as e:   # bad PPM header, shm unreadable, ...: still write summary.json
+        except Exception as e:
             self.fail(f"capture: {type(e).__name__}: {e}")
         n = len(self.ts)
         if not self.stalled:
@@ -380,7 +368,7 @@ class Recorder:
         if not self.stalled:
             wt.join(self.drain_left())
             self.stalled = wt.is_alive()
-        if self.stalled:   # the frames on disk stand; the summary says the rest is missing
+        if self.stalled:
             self.fail(f"encoder stalled: not drained {self.a.drain_s:g} s after stop; ffmpeg killed")
             self.enc.kill()
             wt.join(5)
@@ -401,8 +389,6 @@ class Recorder:
 
 
 def mark_killed(run, why):
-    """Write (or amend) summary.json for a recorder that was SIGKILLed: frames.jsonl
-    and the PNGs on disk stand; the video and the integrity check do not."""
     path = os.path.join(run, "summary.json")
     try:
         with open(path) as f:
@@ -414,7 +400,7 @@ def mark_killed(run, why):
                 for line in f:
                     try:
                         rows.append(json.loads(line))
-                    except ValueError:      # a line cut short by the kill
+                    except ValueError:
                         pass
         except OSError:
             pass

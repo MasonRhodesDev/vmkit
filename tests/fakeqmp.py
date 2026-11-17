@@ -1,15 +1,3 @@
-"""A fake QMP server for tests: threaded AF_UNIX listener, one handler per command.
-
-    srv = FakeQMP(path)                 # starts listening
-    srv.handlers["screendump"] = fn     # fn(args) -> reply dict, None to send nothing,
-                                        # or a callable(f) that writes the stream itself
-    ...
-    srv.requests                        # [(execute, arguments), ...] in arrival order
-    srv.stop()
-
-Default handlers: qmp_capabilities -> {}, screendump -> writes a solid PPM
-(srv.size, srv.color) and returns {}, anything else -> {}.
-"""
 import json
 import os
 import socket
@@ -66,7 +54,7 @@ class FakeQMP:
                 ex, args = m.get("execute"), m.get("arguments", {})
                 self.requests.append((ex, args))
                 r = self._reply(ex, args)
-                if callable(r):              # raw control of the stream (e.g. trickle, hang)
+                if callable(r):
                     r(f)
                 elif r is not None:
                     f.write((json.dumps(r) + "\n").encode())

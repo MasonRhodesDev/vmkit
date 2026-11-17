@@ -1,27 +1,3 @@
-"""Frame selection against a recording's timeline (hypr-qa scenario-schema "Timing").
-
-All times are host CLOCK_MONOTONIC ns: frames.jsonl `t` (screendump reply) and
-actions.jsonl `t_send`/`t_ack`.
-
-Rules:
-  * a point offset ("+300ms"): the FIRST frame with t >= anchor + offset.
-  * a window ("+50ms..+300ms"): EVERY frame with anchor+a <= t <= anchor+b.
-  * a window with no frame in it is an error, not a pass; so is a point with
-    no frame at or after it, and any offset that falls outside the recording
-    (before the first frame's request, or after the last frame).
-  * sampling gaps are errors too: a window that overlaps a gap in gaps.jsonl
-    (a run of screendump errors: no frame exists for it, even when frames lie
-    on both sides), and a point whose frame is more than
-    max(2 x the recording's median frame interval, 100 ms) after it (an error
-    gap or an ordinary slow interval).
-  * the baseline for `changed` is the last frame with t < anchor.
-
-CLI (`vmkit frames`):
-  timeline.py [--dir VMKIT_DIR] [--run RUN] (--at T_NS | --action '#N'|STEP [--anchor send|ack])
-              --offset SPEC[,SPEC...] [--baseline] [--json]
-Prints one line per selected frame: spec, n, t, ms from anchor, path[, inactive].
-Exit 0, or 2 when an offset cannot be resolved (message on stderr).
-"""
 import json
 import os
 import re
@@ -36,7 +12,6 @@ class TimelineError(Exception):
 
 
 def parse_offset(s):
-    """'+100ms' | '-1.5s' | '250' (ms) -> signed ns."""
     m = _OFF.match(s)
     if not m:
         raise TimelineError(f"bad offset {s!r} (want e.g. +100ms, -50ms, +1.5s)")
@@ -46,7 +21,6 @@ def parse_offset(s):
 
 
 def parse_at(spec):
-    """'+300ms' -> ('point', ns); '+50ms..+300ms' -> ('window', a, b)."""
     if ".." in spec:
         a, b = spec.split("..", 1)
         a, b = parse_offset(a), parse_offset(b)
@@ -71,7 +45,6 @@ def load_jsonl(path):
 
 
 class Frames(list):
-    """A recording's frames (sorted by t), with its sampling gaps (gaps.jsonl rows)."""
     gaps = ()
 
 
@@ -87,7 +60,6 @@ LATE_FLOOR_NS = 100 * 1_000_000
 
 
 def late_limit(frames):
-    """How far after a point its frame may be: max(2 x median interval, 100 ms)."""
     iv = sorted(frames[i]["t"] - frames[i - 1]["t"] for i in range(1, len(frames)))
     return max(2 * iv[len(iv) // 2] if iv else 0, LATE_FLOOR_NS)
 
@@ -112,7 +84,6 @@ def _coverage(frames, lo, hi, what):
 
 
 def select_point(frames, t):
-    """First frame with f.t >= t."""
     _coverage(frames, t, t, "offset")
     for f in frames:
         if f["t"] >= t:
@@ -125,7 +96,6 @@ def select_point(frames, t):
 
 
 def select_window(frames, t0, t1):
-    """Every frame with t0 <= f.t <= t1; empty is an error."""
     _coverage(frames, t0, t1, "window")
     for g in getattr(frames, "gaps", ()):
         if g["t_from"] <= t1 and g["t_to"] >= t0:
@@ -145,7 +115,6 @@ def select(frames, anchor, spec):
 
 
 def baseline(frames, anchor):
-    """Last frame with f.t < anchor (the 'before' frame for `changed`)."""
     prev = None
     for f in frames:
         if f["t"] >= anchor:
@@ -157,9 +126,6 @@ def baseline(frames, anchor):
 
 
 def find_action(actions, ref):
-    """ref: an int or "#N" = index into actions.jsonl (negative from the end);
-    any other string = the step label, exactly (so a label may be "2"). A label
-    on more than one action is ambiguous: an error, as is no match."""
     if isinstance(ref, str) and not ref.startswith("#"):
         hits = [a for a in actions if a.get("step") == ref]
         if not hits:
@@ -187,8 +153,6 @@ def anchor_of(action, anchor="send"):
 
 
 def head_run(run, head=0):
-    """A multi-head recording's parent dir (heads.json) -> head N's run dir; any
-    other dir is returned as it is."""
     try:
         with open(os.path.join(run, "heads.json")) as f:
             hs = json.load(f)["heads"]

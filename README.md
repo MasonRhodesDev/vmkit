@@ -101,8 +101,7 @@ Quoting and typing:
 Config resolves from flags → env (`VMKIT_OVERLAY`, `VMKIT_DIR`, `VMKIT_SSH_PORT`,
 `VMKIT_VIEW`, …) → defaults. Sockets/logs/screenshots live in
 `<overlay-dir>/.vmkit` unless `--dir` is given. See the header of `bin/vmkit`
-for the full command and option list, and [docs/CAPABILITIES.md](docs/CAPABILITIES.md)
-for the agent contract.
+for the full command and option list.
 
 ## Timeline: record, act, check, report
 
@@ -222,8 +221,6 @@ building, and product test suites layer on top and stay in their own repos. Its
 first real driver was validated bringing up and inspecting a full graphical
 Linux desktop (greeter → login via injected keystrokes → running session), but
 nothing in the tool is specific to it.
-
-Known gaps and the planned toolchain are tracked in [GAPS.md](GAPS.md).
 
 ## License
 

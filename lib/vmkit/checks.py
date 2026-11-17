@@ -1,30 +1,3 @@
-"""Model-free frame checks (hypr-qa scenario-schema "Checks").
-
-  pixel     region, color '#rrggbb', tolerance (0-255, default 16), min_fraction (default 1.0):
-            passes when >= min_fraction of the region's pixels are within
-            `tolerance` of color on EVERY channel (max-abs per channel).
-  ocr       region (optional), text (case-insensitive substring, whitespace-
-            normalized) or regex (re.search on the raw OCR text): tesseract.
-  template  image, region or near=[x,y]+radius, threshold (0-1 similarity,
-            default 0.9): ImageMagick subimage search (NCC; RMSE for a flat
-            template, where NCC is undefined).
-  changed   region, min_px (default 50), fuzz (percent, default 5): the region
-            differs from the baseline frame (the last frame before the anchor)
-            in >= min_px pixels. A pixel differs when the Euclidean distance of
-            its RGB channels exceeds fuzz% of 255.
-
-Any check takes `not` (invert pass/fail; an error stays an error). A check on
-an inactive frame (QEMU's "Display output is not active" placeholder) is an
-error.
-
-Regions are [x, y, w, h] in framebuffer pixels; negative x/y count from the
-right/bottom edge; w/h of 0 mean "to the edge". A region outside the frame is
-an error.
-
-Frames are decoded with ImageMagick (`magick ... rgb:-`, crop first) when it
-is installed, else in pure Python (slow on large PNGs; fine for PPM and for the
-small synthetic images the unit tests use). VMKIT_PURE_PY=1 forces Python.
-"""
 import os
 import re
 import shutil
@@ -40,10 +13,7 @@ class CheckError(Exception):
     pass
 
 
-# ---- regions -----------------------------------------------------------------
-
 def parse_region(v):
-    """'x,y,w,h' | [x,y,w,h] | None -> list or None."""
     if v is None or v == "":
         return None
     if isinstance(v, str):
@@ -58,7 +28,6 @@ def parse_region(v):
 
 
 def resolve_region(region, W, H):
-    """Schema region -> absolute (x, y, w, h) inside a WxH frame."""
     if region is None:
         return (0, 0, W, H)
     x, y, w, h = region
@@ -78,7 +47,6 @@ def resolve_region(region, W, H):
 
 
 def near_region(near, radius, tw, th, W, H):
-    """Search area for a template centred near (x, y) within radius, clamped to the frame."""
     cx, cy = int(near[0]), int(near[1]); r = int(radius)
     x0 = max(0, cx - r - tw // 2); y0 = max(0, cy - r - th // 2)
     x1 = min(W, cx + r + (tw - tw // 2)); y1 = min(H, cy + r + (th - th // 2))
@@ -95,10 +63,7 @@ def parse_color(c):
     return (v >> 16) & 255, (v >> 8) & 255, v & 255
 
 
-# ---- image loading -----------------------------------------------------------
-
 def load_region(path, region=None):
-    """Decode `path` and return (Image of the resolved region, (x,y,w,h), (W,H))."""
     try:
         W, H = imageio.size(path)
     except (OSError, ValueError) as e:
@@ -118,9 +83,6 @@ def load_region(path, region=None):
     return img, box, (W, H)
 
 
-# ---- checks ------------------------------------------------------------------
-# Each returns (passed: bool, value: dict). Errors raise CheckError.
-
 def _band_table(c, tol):
     return bytes(1 if abs(v - c) <= tol else 0 for v in range(256))
 
@@ -132,7 +94,6 @@ def pixel(path, region, color, tolerance=16, min_fraction=1.0):
     if not 0 <= tol <= 255:
         raise CheckError("tolerance must be 0-255")
     d = img.data
-    # per-channel 0/1 masks via translate, AND-ed as big ints: C speed
     mr = int.from_bytes(d[0::3].translate(_band_table(r, tol)), "big")
     mg = int.from_bytes(d[1::3].translate(_band_table(g, tol)), "big")
     mb = int.from_bytes(d[2::3].translate(_band_table(b, tol)), "big")
@@ -148,7 +109,7 @@ def changed(path, baseline_path, region, min_px=50, fuzz=5):
         wh, bwh = imageio.size(path), imageio.size(baseline_path)
     except (OSError, ValueError) as e:
         raise CheckError(f"cannot read frame: {e}") from None
-    if wh != bwh:   # a resolution change is a change everywhere
+    if wh != bwh:
         box = resolve_region(region, *wh)
         return True, {"changed_px": box[2] * box[3], "region": list(box),
                       "note": f"resolution changed {bwh[0]}x{bwh[1]} -> {wh[0]}x{wh[1]}"}
@@ -193,8 +154,6 @@ def ocr_text(path, region=None, scale=2, psm=None):
                 raise CheckError(f"magick resize failed: {r.stderr.decode(errors='replace').strip()}")
         else:
             imageio.write_png(img, src, level=1)
-        # One OpenMP thread (see OMP_THREAD_LIMIT in bin/vmkit): many threads
-        # thrash on a busy host and make each pass take tens of seconds.
         env = dict(os.environ)
         env.setdefault("OMP_THREAD_LIMIT", "1")
         r = subprocess.run([tess, src, "-", "--psm", str(psm)], capture_output=True, env=env)
@@ -227,8 +186,6 @@ def _magick_compare(args):
 
 
 def _ncc_is_dissimilarity(tmpl_path):
-    """IM >= 7.1.1 reports NCC as a dissimilarity (0 = identical); older IM as a
-    correlation (1 = identical). Ask IM once: compare the template with itself."""
     if "v" not in _NCC_POLARITY:
         out = _magick_compare(["-metric", "NCC", tmpl_path, tmpl_path])
         m = re.search(r"\(([-+0-9.eE]+)\)", out)
@@ -255,7 +212,7 @@ def template(path, image, region=None, near=None, radius=None, threshold=0.9, me
     area, box, _ = load_region(path, region)
     if area.w < tw or area.h < th:
         raise CheckError(f"search area {area.w}x{area.h} is smaller than the {tw}x{th} template")
-    tmpl, _, _ = load_region(image, None)      # any PNG (16-bit, RGBA, ...) via magick
+    tmpl, _, _ = load_region(image, None)
     d = tmpl.data
     flat = len(set(d[0::3])) == 1 and len(set(d[1::3])) == 1 and len(set(d[2::3])) == 1
     metric = (metric or ("rmse" if flat else "ncc")).lower()
@@ -284,8 +241,6 @@ CHECKS = ("pixel", "ocr", "template", "changed")
 
 
 def run_check(kind, frame_path, spec, baseline_path=None, base_dir="."):
-    """Evaluate one check on one frame. spec: the expectation's fields.
-    Returns {"status": pass|fail|error, "passed", "value"?, "error"?}."""
     try:
         region = parse_region(spec.get("region"))
         if kind == "pixel":
@@ -309,7 +264,7 @@ def run_check(kind, frame_path, spec, baseline_path=None, base_dir="."):
                                spec.get("threshold", 0.9), spec.get("metric"))
         else:
             raise CheckError(f"unknown check {kind!r} (want one of {', '.join(CHECKS)})")
-    except (CheckError, ValueError, TypeError, OSError) as e:   # bad field types, unreadable files
+    except (CheckError, ValueError, TypeError, OSError) as e:
         return {"status": "error", "passed": None, "error": str(e)}
     if spec.get("not"):
         ok = not ok

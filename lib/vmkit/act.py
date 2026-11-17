@@ -1,31 +1,3 @@
-"""Timestamped input actions.
-
-Every input action vmkit performs (keys/type/move/click/tap/drag/scroll over
-QMP; ssh/xexec as a subprocess) runs here so it can be stamped on the host's
-CLOCK_MONOTONIC (time.monotonic_ns), the same clock the recorder stamps frames
-with:
-
-  t_send  just before the action's first QMP write / the subprocess start
-  t_ack   after the action's last QMP reply / the subprocess exit
-
-One JSON line per action is appended to <dir>/actions.jsonl (the session
-transcript) and, while a recording is active (<dir>/record.run names its run
-dir), to <run>/actions.jsonl as well. Fields:
-
-  t        host wall clock, UTC ISO-8601 (as in the original transcript)
-  cmd      action name; args: its arguments as one string (original fields)
-  t_send, t_ack   CLOCK_MONOTONIC ns
-  ok       bool; error: message when ok is false
-  step     $VMKIT_STEP when set (lets a runner label its steps)
-  x, y     pointer target, when there is one
-
-Multi-head: with --layout SPEC (see vmkit/heads.py) pointer pixels are in head
---head N's compositor space and map onto the bounding box of all heads; the
-record gains "head". Without --layout the pointer maps over the one framebuffer.
-
-Usage: act.py --dir DIR --sock QMP_SOCK [--tmp TMPD] [--head N] [--layout SPEC] OP ARGS...
-       act.py --dir DIR exec NAME DISPLAY_ARGS -- ARGV...   (subprocess, stdio inherited)
-"""
 import json
 import os
 import subprocess
@@ -60,7 +32,7 @@ def log_paths(d):
             run = f.read().strip()
         if run and os.path.isdir(run):
             paths.append(os.path.join(run, "actions.jsonl"))
-            try:        # a multi-head recording: every head's run dir gets the action
+            try:
                 with open(os.path.join(run, "heads.json")) as f:
                     for h in json.load(f)["heads"]:
                         paths.append(os.path.join(run, h["run"], "actions.jsonl"))
@@ -90,7 +62,7 @@ def fb_size(q, tmp):
         try:
             q.cmd("screendump", {"filename": path, "format": "ppm"})
         except QMPError:
-            q.cmd("screendump", {"filename": path})     # QEMU < 7.1: PPM, no format arg
+            q.cmd("screendump", {"filename": path})
         return imageio.size(path)
     finally:
         try:
@@ -132,10 +104,6 @@ class Actor:
         self._cmd("send-key", {"keys": [{"type": "qcode", "data": k} for k in keys]})
 
 
-# Pause between the characters of `type`. Back-to-back send-key chords lose
-# events in the guest (a dropped shift release turns the rest of the text
-# upper-case, a dropped ctrl breaks the next chord); spacing them out keeps
-# every press and release. VMKIT_TYPE_GAP_MS overrides it.
 TYPE_GAP = float(os.environ.get("VMKIT_TYPE_GAP_MS", "40")) / 1000
 
 
@@ -143,10 +111,9 @@ NEEDS_SIZE = {"move", "tap", "tap-text", "drag"}
 
 
 def run_qmp(op, a, sock, tmp, head=0, layout=None):
-    """Perform op; returns (record fields, stdout message)."""
     try:
         q = QMP(sock)
-    except (QMPError, OSError) as e:    # VM down: a failed action, logged like any other
+    except (QMPError, OSError) as e:
         t = now()
         return {"t_send": t, "t_ack": t, "ok": False, "error": str(e)}, None
     try:
@@ -168,7 +135,7 @@ def run_qmp(op, a, sock, tmp, head=0, layout=None):
                 x0, y0, x1, y1 = map(int, a[:4])
                 A.moveto(x0, y0)
                 A.ev([{"type": "btn", "data": {"down": True, "button": btn}}])
-                for i in range(1, 6):   # interpolated steps so drag-aware UIs see motion
+                for i in range(1, 6):
                     A.moveto(x0 + (x1 - x0) * i // 5, y0 + (y1 - y0) * i // 5)
                 A.ev([{"type": "btn", "data": {"down": False, "button": btn}}])
                 rec.update(x=x0, y=y0)

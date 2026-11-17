@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""vmkit-check: model-free checks on recorded frames (see lib/vmkit/checkcli.py)."""
 import os
 import sys
 

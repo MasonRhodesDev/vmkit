@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""vmkit-report: write report.html for a recording run dir (see lib/vmkit/report.py)."""
 import os
 import sys
 
