@@ -32,7 +32,6 @@ def gpu_json_path(d):
 
 
 def gpu_info(d):
-    """(device id or None, head count) for the VM whose work dir is d."""
     dev, n = os.environ.get("VMKIT_GPU_ID") or None, os.environ.get("VMKIT_GPU_HEADS")
     try:
         with open(gpu_json_path(d)) as f:
@@ -49,8 +48,6 @@ def gpu_info(d):
 
 
 def screendump_args(path, device, head):
-    """QMP screendump arguments for one head. Head 0 of an unnamed device is the
-    default console, so nothing extra is sent for it."""
     a = {"filename": path, "format": "ppm"}
     if device:
         a["device"] = device
@@ -69,7 +66,6 @@ def check_head(d, head):
 
 
 def parse_heads(spec, n):
-    """'all' | 'N' | 'N,M,...' -> sorted list of head indices below n."""
     if spec in ("all", "", None):
         return list(range(n))
     try:
@@ -96,7 +92,6 @@ def parse_layout(spec):
 
 
 def pointer_abs(layout, head, x, y):
-    """(abs_x, abs_y) on 0..32767 for pixel (x, y) of head `head`."""
     if not 0 <= head < len(layout):
         raise HeadError(f"head {head} is not in the layout ({len(layout)} entries)")
     hx, hy, _, _ = layout[head]
@@ -115,20 +110,20 @@ def main(argv):
         dev, n = gpu_info(argv[1])
         print(f"{dev or '-'} {n}")
         return 0
-    if len(argv) == 3 and argv[0] == "head-list":     # DIR SPEC -> space separated head indices
+    if len(argv) == 3 and argv[0] == "head-list":
         try:
             print(*parse_heads(argv[2], gpu_info(argv[1])[1]))
         except HeadError as e:
             print(f"vmkit: {e}", file=sys.stderr)
             return 2
         return 0
-    if len(argv) >= 5 and argv[0] == "write-heads":   # RUN DEVICE FPS HEAD...
+    if len(argv) >= 5 and argv[0] == "write-heads":
         run, dev, fps = argv[1:4]
         with open(os.path.join(run, "heads.json"), "w") as f:
             json.dump({"device": dev, "fps": float(fps),
                        "heads": [{"head": int(h), "run": f"head{h}"} for h in argv[4:]]}, f, indent=1)
         return 0
-    if len(argv) == 4 and argv[0] == "dump-args":    # DIR PATH HEAD -> the screendump arguments, JSON
+    if len(argv) == 4 and argv[0] == "dump-args":
         try:
             dev, _ = check_head(argv[1], int(argv[3]))
             print(json.dumps(screendump_args(argv[2], dev, int(argv[3]))))

@@ -116,28 +116,15 @@
 # it tracks the qemu pid in <dir>/qemu.pid and acts on that.
 set -euo pipefail
 
-# tesseract's OpenMP threads spin against each other on a busy host: one OCR
-# pass took 90 s on a loaded 12-core box and 1.6 s with a single thread. One
-# frame is small work, so default to one thread; a caller's setting wins.
 export OMP_THREAD_LIMIT="${OMP_THREAD_LIMIT:-1}"
 
-# ---- config resolution -------------------------------------------------------
 OVERLAY="${VMKIT_OVERLAY:-}"; CIDATA="${VMKIT_CIDATA:-}"; DIR="${VMKIT_DIR:-}"
 SSH_PORT="${VMKIT_SSH_PORT:-2222}"; SSH_USER="${VMKIT_SSH_USER:-$USER}"
 SSH_KEY="${VMKIT_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 MEM="${VMKIT_MEM:-4096}"; SMP="${VMKIT_SMP:-4}"
 ARCH="${VMKIT_ARCH:-x86_64}"; ACCEL="${VMKIT_ACCEL:-kvm}"
-# VIEW controls the human-facing display: none (agent-only, headless),
-# vnc[:N] (shared live view — agent drives QMP, human attaches a VNC client to
-# the SAME running VM), or gtk (a native window; only works when vmkit is run
-# from a graphical shell). vnc is the collaborative default recommendation.
 VIEW="${VMKIT_VIEW:-none}"
-# CPU/IO priority for qemu (and the recorder): nice level and ionice class
-# (3 = idle; "none" skips ionice). The host may be someone's desktop.
 NICE="${VMKIT_NICE:-19}"; IONICE="${VMKIT_IONICE:-3}"
-# Extra qemu arguments, appended last so they can override: --qemu-arg ARG
-# (repeatable, one argv element each) and/or VMKIT_QEMU_ARGS (split like a
-# shell would, by python shlex: quotes group, newlines separate).
 GPU_HEADS="${VMKIT_GPU_HEADS:-}"; GPU_RES="${VMKIT_GPU_RES:-}"; GPU_MODES="${VMKIT_GPU_MODES:-}"; UEFI="${VMKIT_UEFI:-}"
 HEAD="${VMKIT_HEAD:-0}"; LAYOUT="${VMKIT_LAYOUT:-}"; ALLHEADS=""
 QEMU_EXTRA=()
@@ -179,25 +166,17 @@ set -- "${args[@]}"
 cmd="${1:-status}"; shift || true
 
 [ -n "$DIR" ] || { [ -n "$OVERLAY" ] && DIR="$(dirname "$OVERLAY")/.vmkit" || DIR="$PWD/.vmkit"; }
-# One canonical spelling, so `up` and `down` agree on -pidfile (d, ./d, /abs/d).
 DIR="$(realpath -m "$DIR")"
 mkdir -p "$DIR"
 case "$HEAD" in ''|*[!0-9]*) echo "vmkit: --head must be a number, got '$HEAD'" >&2; exit 2;; esac
 QMP_SOCK="$DIR/qmp.sock"; QMP_REC_SOCK="$DIR/qmp-rec.sock"; SERIAL_LOG="$DIR/serial.log"; PIDFILE="$DIR/qemu.pid"
 KNOWN="$DIR/known_hosts"; VNCFILE="$DIR/vnc"
 REC_PID="$DIR/record.pid"; REC_RUN="$DIR/record.run"; REC_PIDS="$DIR/record.pids"
-# Host-side python helpers (stdlib) live in <repo>/lib/vmkit.
 VMKIT_LIB="$(cd "$(dirname "$(readlink -f "$0")")/../lib" && pwd)"
-# Scratch for raw screendumps: tmpfs when available (a 1280x800 PPM is ~3 MB).
 if [ -n "${VMKIT_TMP:-}" ]; then TMPD="$VMKIT_TMP"
 elif [ -d /dev/shm ] && [ -w /dev/shm ]; then TMPD=/dev/shm
 else TMPD="$DIR"; fi
 
-# ---- QMP helper: negotiate, run one command, print the reply object ----------
-# Prints the reply object on stdout. An {"error":...} reply (or no reply) also
-# prints "vmkit: qmp error: <class>: <desc>" on stderr and exits 1, so a bad
-# command (e.g. an invalid qcode) fails the vmkit call instead of "succeeding".
-# Socket timeout: VMKIT_QMP_TIMEOUT seconds (default 30).
 qmp() {
     python3 - "$QMP_SOCK" "$1" "${VMKIT_QMP_TIMEOUT:-30}" <<'PY'
 import json, socket, sys
@@ -220,11 +199,6 @@ while True:
 PY
 }
 
-# HMP through QMP's human-monitor-command (savevm/loadvm/info are HMP-only on
-# modern QEMU). HMP reports failures as text inside "return", not as a QMP
-# error, so: hmp <line> [strict]. Prints the text. Exits 1 on a QMP error, on
-# text starting "Error", or (strict=1, for savevm/loadvm, which print nothing
-# on success) on any output at all.
 hmp() {
     local line="$1" strict="${2:-0}" req out
     req=$(python3 -c 'import json,sys; print(json.dumps({"execute":"human-monitor-command","arguments":{"command-line":sys.argv[1]}}))' "$line")
@@ -240,9 +214,6 @@ sys.stdout.write(txt)
 PY
 }
 
-# Priority prefix for long-lived host processes (qemu, recorder). ionice is
-# probed first (called by up/record start only): a class can be denied, e.g.
-# -c1 without CAP_SYS_ADMIN, and a failing ionice would never exec qemu.
 prio=(nice -n "$NICE")
 add_ionice() {
     [ "$IONICE" != none ] && command -v ionice >/dev/null || return 0
@@ -255,25 +226,16 @@ SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN"
           -o BatchMode=yes)
 ssh_argv=(ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" -i "$SSH_KEY" "$SSH_USER@127.0.0.1")
 guest_ssh() { "${ssh_argv[@]}" "$@"; }
-# ssh joins its argv with spaces into ONE remote command string, which loses
-# quoting. remote_cmd rebuilds that string: a single argument is taken as a
-# shell command line as-is (`ssh 'journalctl -b | tail'`); two or more are an
-# argv and each is quoted with printf %q (`ssh printf '%s\n' 'a b'`).
 remote_cmd() {
     if [ $# -eq 1 ]; then printf '%s' "$1"; else printf '%q ' "$@"; fi
 }
-# Run in the guest's graphical (systemd --user) session: a single-quoted
-# env-resolver prefix + the caller's command (see remote_cmd).
 xexec_cmd() {
     printf '%s' 'export XDG_RUNTIME_DIR=/run/user/$(id -u); eval "$(systemctl --user show-environment 2>/dev/null | grep -E "^(WAYLAND_DISPLAY|DISPLAY|HYPRLAND_INSTANCE_SIGNATURE|DBUS_SESSION_BUS_ADDRESS|XDG_CURRENT_DESKTOP)=" | sed "s/^/export /")"; '"$(remote_cmd "$@")"
 }
 guest_xexec() { guest_ssh "$(xexec_cmd "$@")"; }
 guest_scp() { scp "${SSH_OPTS[@]}" -P "$SSH_PORT" -i "$SSH_KEY" "$@"; }
 
-# Bounded poll instead of ad-hoc `for i in seq … sleep` loops. Prints nothing;
-# exit 0 on success, 1 on timeout. Uses the shell's own clock via a counter
-# (agent shells often block foreground `sleep`, so keep intervals coarse).
-poll() {  # poll <timeout_s> <interval_s> <cmd...>
+poll() {
     local timeout="$1" interval="$2"; shift 2
     local waited=0
     while ! "$@" >/dev/null 2>&1; do
@@ -284,9 +246,7 @@ poll() {  # poll <timeout_s> <interval_s> <cmd...>
     return 0
 }
 
-# Overlay a coordinate grid + axis labels so pixel targets can be read off a
-# screenshot instead of guessed. Lines every 100px, labels every 200px.
-grid_overlay() {  # grid_overlay <in.png> <out.png>
+grid_overlay() {
     command -v magick >/dev/null || { echo "$1"; return; }
     local in="$1" out="$2"
     read -r W H < <(python3 - "$in" <<'PY'
@@ -314,13 +274,7 @@ PY
         "$out" 2>/dev/null && echo "$out" || echo "$in"
 }
 
-# Screendump as PPM. QEMU's PNG encoder runs inside QEMU (~30 ms per call) and
-# stalls the guest's display (halves its frame rate); PPM is a memcpy. Callers
-# convert on the host when they need PNG. QEMU < 7.1 has no "format" argument
-# but writes PPM by default, so fall back to that.
-# A head other than 0 needs the GPU device id and is range-checked first (QEMU
-# does not validate the index).
-dump_ppm() {  # dump_ppm <out.ppm> [head]
+dump_ppm() {
     local h="${2:-$HEAD}"
     if [ "$h" -gt 0 ]; then
         local args
@@ -332,10 +286,6 @@ dump_ppm() {  # dump_ppm <out.ppm> [head]
         || qmp "$(printf '{"execute":"screendump","arguments":{"filename":"%s"}}' "$1")" >/dev/null
 }
 
-# frame_diff <prev.ppm> <cur.ppm>: pixels that differ (magick compare -fuzz 4%;
-# it exits 1 when they differ, 2 on error: not fatal here). Prints "size" when
-# the resolutions differ (IM 7.1.2 compares two sizes as "0 (0)", exit 0, so
-# the PPM headers are compared first) and "error" when compare prints no number.
 frame_diff() {
     [ "$(head -n 2 "$1")" = "$(head -n 2 "$2")" ] || { echo size; return 0; }
     local d
@@ -343,8 +293,6 @@ frame_diff() {
     echo "${d:-error}"
 }
 
-# Append a non-input command (e.g. shot) to the session transcript
-# ($DIR/actions.jsonl). Input actions are logged, with timestamps, by act.py.
 log_action() {
     python3 -c 'import json, sys, time
 print(json.dumps({"t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "cmd": sys.argv[1],
@@ -352,12 +300,6 @@ print(json.dumps({"t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "cmd"
         >> "$DIR/actions.jsonl" 2>/dev/null || true
 }
 
-# Input actions run in lib/vmkit/act.py, which stamps each one on the host's
-# CLOCK_MONOTONIC (t_send before the first QMP write, t_ack after the last
-# reply) and appends it to actions.jsonl (and to the active recording's run
-# dir). Pointer pixels map to the abs axis using the live framebuffer size.
-# head_set_size <head> <WxH>: wait up to 10 s for the head's control socket, then set the
-# size, retrying a few times (a loaded host can be slow to answer). Non-zero when it never worked.
 head_set_size() {
     local n="$1" m="$2" _ t
     for _ in $(seq 1 100); do [ -S "$DIR/vnc-h$n.sock" ] && break; sleep 0.1 2>/dev/null || :; done
@@ -369,17 +311,14 @@ head_set_size() {
     return 1
 }
 act() { python3 "$VMKIT_LIB/vmkit/act.py" --dir "$DIR" --sock "$QMP_SOCK" --tmp "$TMPD" --head "$HEAD" --layout "$LAYOUT" "$@"; }
-# stamped <name> <shown-args> <argv...>: run a subprocess (stdio inherited),
-# stamped and logged the same way.
 stamped() { local n="$1" shown="$2"; shift 2; python3 "$VMKIT_LIB/vmkit/act.py" --dir "$DIR" exec "$n" "$shown" -- "$@"; }
 
-# OCR the current screen -> lines of "cx cy text". mode: word (default) or line.
 ocr_screen() {
     local mode="${1:-word}" ppm="$TMPD/vmkit-ocr.$$.ppm" rc=0
     { dump_ppm "$ppm" && tesseract "$ppm" - tsv 2>/dev/null | awk -v mode="$mode" -F'\t' '
         NR>1 && $12!="" && $12!=" " {
             if (mode=="line") {
-                key=$2"-"$3"-"$4"-"$5   # page-block-par-line
+                key=$2"-"$3"-"$4"-"$5
                 if (!(key in txt)) { x0[key]=$7; y0[key]=$8 }
                 txt[key]=txt[key] (txt[key]==""?"":" ") $12
                 x1[key]=$7+$9; y1[key]=($8+$10>y1[key]?$8+$10:y1[key])
@@ -403,18 +342,12 @@ up)
         *) echo "vmkit: unknown --view '$VIEW' (none|vnc[:N]|gtk)" >&2; exit 2;;
     esac
     cidata=(); [ -n "$CIDATA" ] && cidata=(-drive if=virtio,file="$CIDATA",format=raw,media=cdrom,read-only=on)
-    # Machine/cpu per arch+accel: KVM uses host passthrough; TCG needs a model.
-    # Devices differ too: x86 q35 has VGA + a USB controller; aarch64 virt has
-    # neither and needs UEFI firmware (pflash) + virtio-gpu/xhci.
     [ "$ACCEL" = kvm ] && cpu=host || cpu=max
     fw=(); gpu=(-vga virtio); usb=(-usb)
     case "$ARCH" in
         x86_64|i386) machine=q35 ;;
         aarch64|arm)
             machine=virt; gpu=(-device virtio-gpu-pci); usb=(-device qemu-xhci)
-            # UEFI: readonly code + a per-VM writable vars copy. (Loop, not
-            # `ls A B C` — ls exits non-zero on any missing path and pipefail
-            # would abort under set -e.)
             code=""; for c in /usr/share/edk2/aarch64/QEMU_EFI.fd /usr/share/AAVMF/AAVMF_CODE.fd /usr/share/edk2/arm/QEMU_EFI.fd; do [ -f "$c" ] && { code="$c"; break; }; done
             vars0=""; for v in /usr/share/edk2/aarch64/QEMU_VARS.fd /usr/share/AAVMF/AAVMF_VARS.fd; do [ -f "$v" ] && { vars0="$v"; break; }; done
             if [ -n "$code" ]; then
@@ -424,10 +357,6 @@ up)
             else echo "vmkit: no aarch64 UEFI firmware found (install edk2-aarch64/AAVMF)" >&2; exit 3; fi ;;
         *) machine=virt ;;
     esac
-    # Multi-head: one virtio GPU named gpu0 with N outputs. QEMU gives every
-    # output the same EDID mode (--gpu-res); per-head modes are set in the guest.
-    # A recorder-only QMP socket per extra head lets one recorder per head run in
-    # parallel (a QMP socket serves one client at a time).
     recsocks=()
     modes=()
     if [ -n "$GPU_MODES" ]; then
@@ -445,16 +374,10 @@ up)
             *)           gpu=(-device "virtio-gpu-pci,id=gpu0,max_outputs=$gh,xres=${res%x*},yres=${res#*x}");;
         esac
         printf '{"id":"gpu0","heads":%s,"res":"%s"}\n' "$gh" "$res" >"$DIR/gpu.json"
-        # Output N > 0 stays "disconnected" in the guest until something sets that
-        # console's UI info, and a headless QEMU has no UI. A VNC server bound to head N
-        # does it when asked for a desktop size (lib/vmkit/rfb.py), so each extra head
-        # gets a unix-socket VNC server, used only by `up` and `heads set`.
         for ((i = 1; i < gh; i++)); do
             recsocks+=(-qmp "unix:$DIR/qmp-rec-h$i.sock,server,nowait" -vnc "unix:$DIR/vnc-h$i.sock,display=gpu0,head=$i")
         done
     fi
-    # UEFI on x86: OVMF code (readonly) + a per-VM vars copy that keeps the NVRAM
-    # (boot entries) between boots. aarch64 always uses UEFI, above.
     if [ -n "$UEFI" ] && [ "$machine" = q35 ]; then
         code=""; for c in /usr/share/edk2/x64/OVMF_CODE.4m.fd /usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd; do [ -f "$c" ] && { code="$c"; break; }; done
         vars0=""; for v in /usr/share/edk2/x64/OVMF_VARS.4m.fd /usr/share/edk2-ovmf/x64/OVMF_VARS.4m.fd /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd /usr/share/edk2/ovmf/OVMF_VARS.fd; do [ -f "$v" ] && { vars0="$v"; break; }; done
@@ -481,14 +404,12 @@ up)
         -pidfile "$PIDFILE" \
         ${QEMU_EXTRA[@]+"${QEMU_EXTRA[@]}"} &
     echo "   qemu pid $!"
-    # Enable the extra heads right away, so the firmware and the kernel see them.
-    # Heads without a listed mode get --gpu-res.
     if [ -n "${gh:-}" ] && [ "$gh" -gt 1 ]; then
         for ((i = 1; i < gh; i++)); do
             m="${modes[$i]:-$res}"
             head_set_size "$i" "$m" || { echo "vmkit: could not enable head $i (retry with: vmkit heads set $i $m)" >&2; headfail=1; }
         done
-        [ -z "${headfail:-}" ] || exit 1   # QEMU is running; the VM is up, but not as asked
+        [ -z "${headfail:-}" ] || exit 1
     fi
     ;;
 status)
@@ -502,11 +423,10 @@ shot)
     log_action shot "$@"
     grid=""; name="shot"; allheads=""
     for a in "$@"; do case "$a" in --grid) grid=1;; --heads) allheads=1;; *) name="$a";; esac; done
-    # --head N, VMKIT_HEAD and --heads name the files <name>-head<N>.png; with no head chosen, <name>.png
     if [ -n "$allheads" ]; then
         read -r _dev nheads < <(python3 "$VMKIT_LIB/vmkit/heads.py" info "$DIR")
         hl=$(seq 0 $((nheads - 1)))
-    elif [ -n "${HEAD_EXPLICIT:-}${VMKIT_HEAD:-}" ]; then hl="$HEAD"; suffix=1   # --head or VMKIT_HEAD
+    elif [ -n "${HEAD_EXPLICIT:-}${VMKIT_HEAD:-}" ]; then hl="$HEAD"; suffix=1
     else hl=0; fi
     [ -z "$allheads" ] || suffix=1
     for h in $hl; do
@@ -519,7 +439,7 @@ shot)
     done
     ;;
 heads)
-    if [ "${1:-}" = set ]; then   # heads set N WxH: enable head N (>= 1) or resize it, live
+    if [ "${1:-}" = set ]; then
         n="${2:?vmkit heads set N WxH}"; m="${3:?vmkit heads set N WxH}"
         [[ "$m" =~ ^[0-9]+x[0-9]+$ ]] || { echo "vmkit heads set: mode must be WxH" >&2; exit 2; }
         python3 "$VMKIT_LIB/vmkit/heads.py" dump-args "$DIR" /dev/null "$n" >/dev/null || exit 2
@@ -535,23 +455,15 @@ heads)
     done
     ;;
 find)
-    # OCR the screen -> "cx,cy<TAB>text". `find "Shut Down"` filters (case-
-    # insensitive substring); bare `find` prints everything. --line groups a
-    # whole OCR line (so multi-word labels match); default is per-word.
     command -v tesseract >/dev/null || { echo "vmkit find: tesseract not installed on host" >&2; exit 3; }
     mode=word; q=""
     for a in "$@"; do case "$a" in --line) mode=line;; *) q="$a";; esac; done
     ocr_screen "$mode" | awk -v q="$q" -F'\t' 'q=="" || index(tolower($2),tolower(q))>0 {gsub(/ /,",",$1); print $1"\t"$2}'
     ;;
 tap-text)
-    # OCR-locate a label and click it. `tap-text "Shut Down" [nth] [button]`.
-    # Uses --line grouping so multi-word labels match. Exit 1 if not found.
     command -v tesseract >/dev/null || { echo "vmkit tap-text: tesseract not installed on host" >&2; exit 3; }
     q="${1:?vmkit tap-text \"<label>\" [nth] [button]}"; nth="${2:-1}"; btn="${3:-left}"
     ppm="$TMPD/vmkit-ocr.$$.ppm"; rc=0
-    # Match the query as a consecutive run of words within one OCR line and
-    # target the bbox of just those words (so adjacent buttons don't merge).
-    # tesseract TSV goes to a file: a heredoc script can't also read stdin.
     { dump_ppm "$ppm" && tesseract "$ppm" - tsv >"$DIR/.ocr.tsv" 2>/dev/null; } || rc=$?
     rm -f "$ppm"; [ "$rc" -eq 0 ] || exit "$rc"
     target=$(python3 - "$q" "$nth" "$DIR/.ocr.tsv" <<'PY'
@@ -561,8 +473,8 @@ lines={}
 for ln in open(sys.argv[3], encoding="utf-8", errors="replace"):
     p=ln.rstrip("\n").split("\t")
     if len(p)<12 or p[0]=="level" or p[11].strip()=="": continue
-    key=(p[1],p[2],p[3],p[4])  # page/block/par/line
-    lines.setdefault(key,[]).append((p[11], int(p[6]),int(p[7]),int(p[8]),int(p[9])))  # text,l,t,w,h
+    key=(p[1],p[2],p[3],p[4])
+    lines.setdefault(key,[]).append((p[11], int(p[6]),int(p[7]),int(p[8]),int(p[9])))
 hits=[]
 for words in lines.values():
     toks=[w[0].lower() for w in words]
@@ -572,7 +484,6 @@ for words in lines.values():
             l=min(w[1] for w in run); t=min(w[2] for w in run)
             r=max(w[1]+w[3] for w in run); b=max(w[2]+w[4] for w in run)
             hits.append(((l+r)//2,(t+b)//2))
-# fall back to substring-in-line if no exact word run
 if not hits:
     ql=" ".join(q)
     for words in lines.values():
@@ -603,29 +514,19 @@ type)
     ;;
 record)
     sub="${1:-status}"; shift || true
-    # pid_running: exists and is not a zombie (a dead child of this shell).
     pid_running() { kill -0 "$1" 2>/dev/null && [ "$(awk '{print $3}' "/proc/$1/stat" 2>/dev/null)" != Z ]; }
-    # rec_alive (stop/status, possibly long after start): also require the
-    # cmdline to name the recorder, so a reused pid is not signalled.
-    # (no `| grep -q`: under pipefail its early exit SIGPIPEs the reader)
     rec_alive() { local p c; p=$(cat "$REC_PID" 2>/dev/null) && [ -n "$p" ] && pid_running "$p" || return 1
         c=$(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null); [[ "$c" == *vmkit-record* ]]; }
-    # rec_unstart <run>: a start that got no frame removes what the recorder
-    # made there, so a retry with the same --out is not "already has a
-    # recording". The logs stay (the error points at them; a retry appends).
     rec_unstart() { rm -f "$REC_PID" "$REC_RUN" "$1/frames.jsonl" "$1/segments.jsonl" "$1/summary.json"
         rmdir "$1/frames" 2>/dev/null || :; }
     case "$sub" in
     start)
-        # record start [--fps N] [--out RUNDIR] [--degraded-ms MS]
         fps="${VMKIT_REC_FPS:-30}"; out=""; dms="${VMKIT_REC_DEGRADED_MS:-}"; hspec=""
         while [ $# -gt 0 ]; do case "$1" in
             --fps) fps="$2"; shift 2;; --out) out="$2"; shift 2;; --degraded-ms) dms="$2"; shift 2;;
             --heads) hspec="${2:-all}"; shift 2;;
             *) echo "usage: vmkit record start [--fps N] [--out RUNDIR] [--degraded-ms MS] [--heads all|0,1,..]" >&2; exit 2;; esac; done
-        # A head chosen with --head / VMKIT_HEAD but no --heads records that head, as --heads N would.
         [ -n "$hspec" ] || [ "$HEAD" = 0 ] || hspec="$HEAD"
-        # "Degraded" = a frame interval over this: 50 ms at 30 fps, 1.5 x the period below ~20 fps.
         [ -n "$dms" ] || dms=$(awk -v f="$fps" 'BEGIN { d = 1500 / f; print (d < 50 ? 50 : int(d)) }')
         rec_alive && { echo "vmkit record: already recording to $(cat "$REC_RUN") (pid $(cat "$REC_PID"))" >&2; exit 1; }
         [ -S "$QMP_REC_SOCK" ] || { echo "vmkit record: no $QMP_REC_SOCK (VM not up, or booted by a vmkit without the recorder socket)" >&2; exit 1; }
@@ -634,7 +535,6 @@ record)
         mkdir -p "$out"; out="$(cd "$out" && pwd)"
         [ -e "$out/frames.jsonl" ] || [ -e "$out/heads.json" ] && { echo "vmkit record: $out already has a recording" >&2; exit 1; }
         if [ -n "$hspec" ]; then
-            # One recorder per head (own QMP socket, own run dir), all on the host clock.
             hdev=$(python3 "$VMKIT_LIB/vmkit/heads.py" head-list "$DIR" "$hspec") || exit 2
             read -r gdev gheads < <(python3 "$VMKIT_LIB/vmkit/heads.py" info "$DIR")
             [ "$gdev" != - ] || { echo "vmkit record: --heads needs the GPU device id (vmkit up --gpu-heads, or VMKIT_GPU_ID)" >&2; exit 2; }
@@ -661,21 +561,15 @@ record)
             done
             echo "$out"; exit 0
         fi
-        # Own session + stdio to a file: a backgrounded child holding our stdout
-        # would block a caller reading it (same footgun as `up`).
         add_ionice
         setsid "${prio[@]}" python3 "$(dirname "$VMKIT_LIB")/bin/vmkit-record" --sock "$QMP_REC_SOCK" \
             --run "$out" --fps "$fps" --degraded-ms "$dms" >>"$out/recorder.out" 2>&1 </dev/null &
         rp=$!; echo "$rp" >"$REC_PID"; echo "$out" >"$REC_RUN"
-        # Block until the first frame is stamped, so actions after this are
-        # covered. Liveness here is pid-only: $rp is our own child, and until
-        # its exec chain (setsid, nice, ionice, python3) completes its cmdline
-        # is still this script's (or empty), which rec_alive would reject.
         i=0; while ! [ -s "$out/frames.jsonl" ]; do
             if ! pid_running "$rp"; then rec_unstart "$out"
                 echo "vmkit record: recorder exited; see $out/recorder.log $out/recorder.out" >&2
                 tail -3 "$out/recorder.log" "$out/recorder.out" >&2 2>/dev/null; exit 1; fi
-            if [ "$i" -ge 100 ]; then   # stop it (TERM, then KILL: a hung QMP read ignores TERM)
+            if [ "$i" -ge 100 ]; then
                 kill -TERM "$rp" 2>/dev/null || :
                 j=0; while pid_running "$rp" && [ "$j" -lt 20 ]; do sleep 0.1 2>/dev/null || :; j=$((j+1)); done
                 pid_running "$rp" && { kill -KILL "$rp" 2>/dev/null || :; }
@@ -686,16 +580,11 @@ record)
         echo "$out"
         ;;
     stop)
-        # TERM, then after VMKIT_REC_STOP_TIMEOUT s (default 30, may be
-        # fractional) KILL the recorder's process group (it is a session leader:
-        # that includes its ffmpeg), e.g. when a hung QEMU or encoder keeps it
-        # from acting on TERM. A clean drain at nice 19 under load can take a
-        # while. record.pid/record.run go only once it is gone.
         to="${VMKIT_REC_STOP_TIMEOUT:-30}"
         [[ "$to" =~ ^([0-9]+)(\.([0-9]+))?$ ]] || {
             echo "vmkit record: VMKIT_REC_STOP_TIMEOUT must be seconds (e.g. 30 or 2.5), got '$to'" >&2; exit 2; }
         frac="${BASH_REMATCH[3]:-0}"; ticks=$((10#${BASH_REMATCH[1]} * 10 + 10#${frac:0:1}))
-        if [ -f "$REC_PIDS" ]; then   # multi-head: TERM every head's recorder, then wait / KILL each
+        if [ -f "$REC_PIDS" ]; then
             out=$(cat "$REC_RUN" 2>/dev/null); rc=0; any=""
             while read -r p d; do pid_running "$p" && { kill -TERM "$p" 2>/dev/null || :; any=1; }; done <"$REC_PIDS"
             [ -n "$any" ] || { rm -f "$REC_PID" "$REC_RUN" "$REC_PIDS"; echo "vmkit record: not recording" >&2; exit 1; }
@@ -765,15 +654,13 @@ PY
     *) echo "usage: vmkit record start|stop|status" >&2; exit 2;;
     esac
     ;;
-frames)  # select recorded frames by anchor + offset (lib/vmkit/timeline.py)
+frames)
     python3 "$VMKIT_LIB/vmkit/timeline.py" --dir "$DIR" "$@" ;;
-check)   # model-free checks on recorded frames (bin/vmkit-check)
+check)
     python3 "$(dirname "$VMKIT_LIB")/bin/vmkit-check" "$@" --dir "$DIR" ;;
-report)  # report.html for a run dir (lib/vmkit/report.py)
+report)
     python3 "$(dirname "$VMKIT_LIB")/bin/vmkit-report" --dir "$DIR" "$@" ;;
 view)
-    # Shared live view for the human, alongside the agent's QMP control of the
-    # same VM. Requires the VM to have been started with --view vnc[:N].
     [ -f "$VNCFILE" ] || { echo "no VNC view active — start with: vmkit up --view vnc" >&2; exit 1; }
     port=$(cat "$VNCFILE"); addr="127.0.0.1:$port"
     echo "VNC: $addr  (display :$((port-5900)))"
@@ -795,7 +682,6 @@ view)
     echo "no VNC client found (tried remote-viewer/vinagre/gvncviewer/wlvncc/vncviewer)" >&2; exit 1
     ;;
 wait)
-    # Replace ad-hoc poll loops. Subcommands print nothing; exit 0/1.
     what="${1:-ssh}"; shift || true
     case "$what" in
         ssh)   to="${1:-120}"; poll "$to" 3 guest_ssh true \
@@ -803,23 +689,19 @@ wait)
         exec)  cmd="${1:?vmkit wait exec \"<cmd>\"}"; to="${2:-120}"
                poll "$to" 3 guest_ssh "$cmd" \
                    && echo "condition met" || { echo "timed out ($to s): $cmd" >&2; exit 1; };;
-        xexec) cmd="${1:?vmkit wait xexec \"<cmd>\"}"; to="${2:-120}"   # polled in the graphical session
+        xexec) cmd="${1:?vmkit wait xexec \"<cmd>\"}"; to="${2:-120}"
                poll "$to" 2 guest_xexec "$cmd" \
                    && echo "condition met" || { echo "timed out ($to s): $cmd" >&2; exit 1; };;
         serial) re="${1:?vmkit wait serial <regex>}"; to="${2:-120}"
                poll "$to" 2 grep -Eq "$re" "$SERIAL_LOG" \
                    && echo "serial matched: $re" || { echo "timed out ($to s): serial !~ $re" >&2; exit 1; };;
         screen) to="${1:-60}"; want="${2:-2}"; thresh="${VMKIT_STABLE_PX:-5000}"
-               # "Stable" = successive frames differ by fewer than THRESH pixels,
-               # so a ticking clock (a few hundred px) doesn't defeat it but a
-               # window opening/closing (many thousands) does. Needs magick.
-               # A resolution change or a compare error is never stable.
                command -v magick >/dev/null || { echo "vmkit wait screen needs magick" >&2; exit 3; }
                stable=0; waited=0; prev=""
                trap 'rm -f "$TMPD"/vmkit-st.$$.*.ppm' EXIT
                while [ "$waited" -lt "$to" ]; do
                    cur="$TMPD/vmkit-st.$$.$((waited % 2)).ppm"
-                   if ! dump_ppm "$cur"; then   # transient (e.g. no surface mid mode-switch): retry
+                   if ! dump_ppm "$cur"; then
                        rm -f "$cur"; prev=""; stable=0; sleep 1 2>/dev/null || :; waited=$((waited+1)); continue
                    fi
                    if [ -n "$prev" ]; then
@@ -833,31 +715,28 @@ wait)
         *) echo "usage: vmkit wait {ssh|exec <cmd>|xexec <cmd>|serial <regex>|screen} [timeout]" >&2; exit 2;;
     esac
     ;;
-push)  # push <local> <guest-dest> — scp then sudo-install (dest may be root-owned)
+push)
     src="${1:?vmkit push <local> <guest-dest>}"; dst="${2:?dest required}"
     [ -f "$src" ] || { echo "vmkit push: no such file: $src" >&2; exit 2; }
     mode=$(stat -c '%a' "$src"); tmp="/tmp/.vmkit-push.$$"
     guest_scp "$src" "$SSH_USER@127.0.0.1:$tmp" >/dev/null
     guest_ssh "sudo install -Dm$mode $tmp '$dst' && rm -f $tmp" && echo "pushed $src -> $dst (mode $mode)"
     ;;
-pull)  # pull <guest-path> <local>
+pull)
     gsrc="${1:?vmkit pull <guest-path> <local>}"; ldst="${2:?local dest required}"
     guest_scp "$SSH_USER@127.0.0.1:$gsrc" "$ldst" >/dev/null && echo "pulled $gsrc -> $ldst"
     ;;
-xexec)  # run a command inside the guest's graphical (systemd --user) session,
-        # resolving XDG_RUNTIME_DIR + WAYLAND_DISPLAY/DISPLAY/etc. so GUI apps
-        # launch on the desktop without hand-set env. Generic for Linux guests.
+xexec)
     [ $# -gt 0 ] || { echo "usage: vmkit xexec <cmd...>" >&2; exit 2; }
     stamped xexec "$(remote_cmd "$@")" "${ssh_argv[@]}" "$(xexec_cmd "$@")"
     ;;
-watch)  # emit a line whenever the screen changes beyond VMKIT_STABLE_PX, until
-        # timeout. Pairs with the harness Monitor for motion-aware waiting.
+watch)
     command -v magick >/dev/null || { echo "vmkit watch needs magick" >&2; exit 3; }
     to="${1:-120}"; thresh="${VMKIT_STABLE_PX:-5000}"; waited=0; prev=""
     trap 'rm -f "$TMPD"/vmkit-w.$$.*.ppm' EXIT
     while [ "$waited" -lt "$to" ]; do
         cur="$TMPD/vmkit-w.$$.$((waited % 2)).ppm"
-        if ! dump_ppm "$cur"; then   # transient: retry next second
+        if ! dump_ppm "$cur"; then
             rm -f "$cur"; prev=""; sleep 1 2>/dev/null || :; waited=$((waited+1)); continue
         fi
         if [ -n "$prev" ]; then
@@ -872,7 +751,7 @@ watch)  # emit a line whenever the screen changes beyond VMKIT_STABLE_PX, until
         prev="$cur"; sleep 1 2>/dev/null || :; waited=$((waited+1))
     done
     ;;
-overlay)  # overlay new <base> [overlay] | overlay reset [overlay]
+overlay)
     sub="${1:-}"; shift || true
     [ -n "$sub" ] || { echo "usage: vmkit overlay {new <base> [overlay]|reset [overlay]}" >&2; exit 2; }
     case "$sub" in
@@ -886,7 +765,7 @@ overlay)  # overlay new <base> [overlay] | overlay reset [overlay]
         *) echo "usage: vmkit overlay {new <base> [overlay]|reset [overlay]}" >&2; exit 2;;
     esac
     ;;
-image)  # image pull <url> [dest] — fetch a base cloud image
+image)
     [ "${1:-}" = pull ] || { echo "usage: vmkit image pull <url> [dest]" >&2; exit 2; }
     url="${2:?image pull <url> [dest]}"; dest="${3:-$(basename "$url")}"
     command -v curl >/dev/null || { echo "vmkit image pull needs curl" >&2; exit 3; }
@@ -897,14 +776,9 @@ ssh)    if [ $# -eq 0 ]; then guest_ssh; else stamped ssh "$(remote_cmd "$@")" "
 qmp)    qmp "$1" ;;
 hmp)    hmp "$*" ;;
 snapshots) hmp "info snapshots" ;;
-# savevm/loadvm write/read the whole RAM image and can outlast the 30 s default
-# socket timeout, so they get VMKIT_SNAPSHOT_TIMEOUT (default 600 s).
 snapshot) n="${1:?vmkit snapshot NAME}"
           VMKIT_QMP_TIMEOUT="${VMKIT_SNAPSHOT_TIMEOUT:-600}" hmp "savevm $n" 1 && echo "snapshot $n saved" ;;
 restore)  n="${1:?vmkit restore NAME}"
-          # QEMU stops the VM for loadvm and restarts it only if it was running.
-          # A FAILED loadvm leaves it stopped in "restore-vm", so a later good
-          # loadvm would not restart it either: treat restore-vm as "was running".
           runstate() { qmp '{"execute":"query-status"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["return"]["status"])'; }
           before=$(runstate)
           if VMKIT_QMP_TIMEOUT="${VMKIT_SNAPSHOT_TIMEOUT:-600}" hmp "loadvm $n" 1; then
@@ -917,17 +791,11 @@ restore)  n="${1:?vmkit restore NAME}"
               exit 1
           fi ;;
 down)
-    # Wait on the qemu process itself, not on the ssh port (slirp keeps the
-    # forwarded port listening for as long as qemu runs, guest or no guest).
-    # qemu deletes its pidfile on exit, so read the pid before powering down,
-    # and only ever signal it while its cmdline is still THIS VM's qemu (its
-    # -pidfile is ours: pid reuse, other VMs). A running recorder is stopped
-    # first so it writes its summary.
     if [ -f "$REC_PID" ]; then "$0" --dir "$DIR" record stop || true; fi
     P=$(cat "$PIDFILE" 2>/dev/null || true)
     qemu_alive() { local c; [ -n "$P" ] && kill -0 "$P" 2>/dev/null && c=$(tr '\0' ' ' <"/proc/$P/cmdline" 2>/dev/null) && [[ "$c" == *qemu-system*" -pidfile $PIDFILE "* ]]; }
     qmp_alive() { [ -S "$QMP_SOCK" ] && qmp '{"execute":"query-status"}' >/dev/null 2>&1; }
-    wait_gone() {  # wait_gone <seconds>
+    wait_gone() {
         local i=0; while qemu_alive; do [ "$i" -ge "$1" ] && return 1; sleep 1 2>/dev/null || :; i=$((i+1)); done
     }
     [ -S "$QMP_SOCK" ] && qmp '{"execute":"system_powerdown"}' >/dev/null 2>&1 || true
@@ -938,14 +806,13 @@ down)
             if ! wait_gone 10; then echo "vmkit down: SIGKILL qemu pid $P" >&2; kill -9 "$P" 2>/dev/null || true; wait_gone 5 || true; fi
         fi
     else
-        # No live pid to wait on (no/empty/stale pidfile): wait for QMP to stop answering.
         i=0; while qmp_alive; do
             if [ "$i" -ge "${VMKIT_DOWN_TIMEOUT:-60}" ]; then
                 echo "vmkit down: state unknown: no qemu pid in $PIDFILE, and QEMU still answers on $QMP_SOCK after powerdown (nothing signalled; vmkit qmp '{\"execute\":\"quit\"}' stops it)" >&2
                 exit 1; fi
             sleep 1 2>/dev/null || :; i=$((i+1)); done
     fi
-    qemu_alive || rm -f "$PIDFILE"      # qemu leaves it behind when SIGKILLed
+    qemu_alive || rm -f "$PIDFILE"
     rm -f "$QMP_SOCK" "$QMP_REC_SOCK"; echo "down"
     ;;
 *) sed -n '2,/^set -euo pipefail/p' "$0" | sed '$d'; exit 2 ;;

@@ -1,31 +1,3 @@
-"""vmkit check: evaluate model-free checks on recorded frames.
-
-One check on explicit frames:
-  vmkit check pixel    --frame F --region X,Y,W,H --color '#rrggbb' [--tolerance 16] [--min-fraction 1.0]
-  vmkit check changed  --frame F --baseline B [--region ..] [--min-px 50] [--fuzz 5]
-  vmkit check ocr      --frame F [--region ..] (--text T | --regex R) [--psm N]
-  vmkit check template --frame F --image T.png (--region .. | --near X,Y --radius R) [--threshold 0.9]
-
-The same, with frames chosen from a recording by the Timing rules (instead of --frame):
-  ... [--run RUN] (--at T_NS | --action '#N'|STEP [--anchor send|ack]) --offset SPEC [--mode any|all]
-  (`changed` then uses the last frame before the anchor as its baseline. A window
-  defaults to --mode any, or to all with --not: "in no frame of the window".)
-
-Any check: --not. Prints a JSON result; exit 0 pass, 1 fail, 2 error.
-
-A batch of expectations (what a scenario runner calls):
-  vmkit check batch [--run RUN] EXPECT.json [-o RESULTS.json]
-EXPECT.json is a list of objects:
-  {"id": "...", "action": N|"step", "anchor": "send"|"ack", "at": "+50ms..+300ms",
-   "mode": "any"|"all", "check": "pixel", ...check fields..., "not": false}
-(or "t": T_NS instead of "action"). "action" is an index into actions.jsonl
-(an int, or "#N"; negative from the end) or a step label (exact; a label on
-several actions is an error). Relative template paths resolve against
-EXPECT.json's directory. Writes results.json (default <run>/results.json):
-per expectation its status (pass/fail/error), the frames used with their
-per-frame status and measured values. Exit 0 all pass, 1 a check failed,
-2 an error (e.g. an unresolvable window), the schema's exit codes.
-"""
 import argparse
 import json
 import os
@@ -47,7 +19,6 @@ def aggregate(per_frame, mode):
 
 
 def evaluate(run, frames, actions, exp, base_dir="."):
-    """Evaluate one expectation against a recording. Never raises."""
     kind = exp.get("check")
     at = exp.get("at", "+0ms")
     anchor_kind = exp.get("anchor", "send")
@@ -64,7 +35,6 @@ def evaluate(run, frames, actions, exp, base_dir="."):
                 raise T.TimelineError(f"the action failed: {act.get('error')}")
         out["anchor_t"] = anchor
         is_window = T.parse_at(at)[0] == "window"
-        # schema v0.3: `not` on a window means "in no frame", so it defaults to all
         mode = exp.get("mode", "any" if is_window and not exp.get("not") else "all")
         out["mode"] = mode
         sel = T.select(frames, anchor, at)
@@ -158,7 +128,7 @@ def main_batch(argv):
     for e in exps:
         try:
             results.append(evaluate(run, frames, actions, e, base_dir))
-        except Exception as x:   # backstop: one bad expectation must not lose the others' results
+        except Exception as x:
             results.append({"id": e.get("id") if isinstance(e, dict) else None,
                             "check": e.get("check") if isinstance(e, dict) else None,
                             "at": e.get("at") if isinstance(e, dict) else None,

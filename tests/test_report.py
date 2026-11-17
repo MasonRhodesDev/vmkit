@@ -62,8 +62,8 @@ class Report(unittest.TestCase):
         self.assertIn("no frame in the window", page)
         self.assertRegex(page, r"pass: 1")
         p = Links(); p.feed(page)
-        self.assertGreater(p.rects, 0)                     # check regions outlined
-        for ref in p.refs:                                 # no external assets; every link resolves
+        self.assertGreater(p.rects, 0)
+        for ref in p.refs:
             self.assertFalse(re.match(r"^[a-z]+:", ref), ref)
             if ref != "video.mkv":
                 self.assertTrue(os.path.exists(os.path.join(self.td, ref)), ref)

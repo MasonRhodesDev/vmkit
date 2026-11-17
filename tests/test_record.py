@@ -18,7 +18,6 @@ MSG = "Display output is not active."
 
 
 def frame(w, h, text_cells=None, fg=b"\xaa\xaa\xaa", row=None, col=None, noise=None):
-    """Black RGB frame with 'glyph' pixels in the text row, like QEMU's placeholder."""
     buf = bytearray(w * h * 3)
     n = len(MSG) if text_cells is None else text_cells
     r = ((h // 16 - 1) // 2) if row is None else row
@@ -73,8 +72,6 @@ class Percentile(unittest.TestCase):
 
 
 class CaptureErrors(unittest.TestCase):
-    """Recorder.capture() against a fake QMP server (no ffmpeg: the queue is drained here)."""
-
     def setUp(self):
         self.td = tempfile.mkdtemp(prefix="vmkit-rec-")
         self.run = os.path.join(self.td, "run")
@@ -112,7 +109,6 @@ class CaptureErrors(unittest.TestCase):
         self.assertFalse(ct.is_alive(), "capture did not stop")
 
     def dumps(self, fail):
-        """screendump fails (error reply) on the calls for which fail(i) is true (i from 1)."""
         def h(args):
             self.calls += 1
             if fail(self.calls):
@@ -147,9 +143,9 @@ class CaptureErrors(unittest.TestCase):
         g = G[0]
         self.assertEqual(g["errors"], 3)
         self.assertIn("no surface", g["reason"])
-        self.assertLess(F[1]["t"], g["t_from"])          # after frame 1's reply ...
-        self.assertLessEqual(g["t_to"], F[2]["t_req"])   # ... up to frame 2's request
-        self.assertEqual([f["n"] for f in F], list(range(len(F))))   # n is not consumed
+        self.assertLess(F[1]["t"], g["t_from"])
+        self.assertLessEqual(g["t_to"], F[2]["t_req"])
+        self.assertEqual([f["n"] for f in F], list(range(len(F))))
 
     def test_a_gap_open_at_stop_is_recorded(self):
         self.dumps(lambda i: i > 2)
@@ -170,7 +166,7 @@ class CaptureErrors(unittest.TestCase):
         self.assertEqual(len(R.ts), 2)
 
     def test_many_fast_errors_within_the_limit_are_a_gap(self):
-        self.dumps(lambda i: 2 < i <= 60)        # ~0.6 s of errors at 100 fps
+        self.dumps(lambda i: 2 < i <= 60)
         R = self.recorder(max_error_s=5.0)
         self.capture(R, 1.2)
         self.assertIsNone(R.error)
@@ -180,7 +176,7 @@ class CaptureErrors(unittest.TestCase):
     def test_stop_interrupts_a_hung_screendump(self):
         n = {"i": 0}
 
-        def h(args):         # QEMU stops answering after a few frames (qmp_timeout is long)
+        def h(args):
             n["i"] += 1
             return self.srv.screendump(args) if n["i"] <= 3 else None
         self.srv.handlers["screendump"] = h
@@ -196,7 +192,7 @@ class CaptureErrors(unittest.TestCase):
     def test_reply_deadline_holds_against_a_fast_trickle(self):
         from vmkit.qmp import QMP
 
-        def trickle(f):      # bytes every 0.1 s, never a newline
+        def trickle(f):
             while not self.srv.closing.wait(0.1):
                 f.write(b" ")
         self.srv.handlers["screendump"] = lambda args: trickle
@@ -215,7 +211,7 @@ class CaptureErrors(unittest.TestCase):
         q.close()
 
     def test_eof_is_fatal(self):
-        self.srv.handlers["screendump"] = lambda args: (lambda f: f.close())   # QEMU went away
+        self.srv.handlers["screendump"] = lambda args: (lambda f: f.close())
         R = self.recorder()
         self.capture(R, 3)
         self.assertIn("connection closed", R.error or "")
@@ -241,11 +237,11 @@ class CaptureErrors(unittest.TestCase):
         self.assertTrue(S["degraded"])
 
     def test_summary_written_when_the_ppm_is_missing(self):
-        S = self.summary_after(lambda args: {"return": {}})    # replies ok, writes nothing
+        S = self.summary_after(lambda args: {"return": {}})
         self.assertIn("No such file", S["error"])
 
     def test_a_stalled_encoder_ends_in_bounded_time_flagged(self):
-        stall = os.path.join(self.td, "ffmpeg")   # never reads its input
+        stall = os.path.join(self.td, "ffmpeg")
         with open(stall, "w") as f:
             f.write("#!/bin/sh\nexec sleep 300\n")
         os.chmod(stall, 0o755)

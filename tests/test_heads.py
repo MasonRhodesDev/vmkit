@@ -1,4 +1,3 @@
-"""Multi-head: head addressing, pointer mapping, per-head shot/record (fake QMP, no VM)."""
 import json
 import os
 import shutil
@@ -44,8 +43,8 @@ class Rfb(unittest.TestCase):
         rfb.set_size(path, 1920, 1080)
         t.join(5); srv.close()
         m = got["msg"]
-        self.assertEqual(m[0], 2)                                    # SetEncodings
-        self.assertEqual(m[12], 251)                                 # SetDesktopSize
+        self.assertEqual(m[0], 2)
+        self.assertEqual(m[12], 251)
         self.assertEqual(struct.unpack(">HH", m[14:18]), (1920, 1080))
 
 
@@ -74,16 +73,15 @@ class Helpers(unittest.TestCase):
                 heads.parse_layout(bad)
 
     def test_pointer_abs_spans_the_bounding_box(self):
-        lay = heads.parse_layout(LAYOUT)            # box 7520 x 3840
+        lay = heads.parse_layout(LAYOUT)
         self.assertEqual(heads.pointer_abs(lay, 0, 0, 0), (0, 0))
         self.assertEqual(heads.pointer_abs(lay, 2, 2159, 3839), (32767, 32767))
-        # centre of head 1 (3440x1440 at x=1920): global x = 1920 + 1720
         x, y = heads.pointer_abs(lay, 1, 1720, 720)
         self.assertEqual(x, round(3640 / 7519 * 32767))
         self.assertEqual(y, round(720 / 3839 * 32767))
 
     def test_pointer_abs_box_starts_at_the_smallest_origin(self):
-        lay = heads.parse_layout("-1920,0,1920,1080;0,0,1920,1080")      # a head left of the origin
+        lay = heads.parse_layout("-1920,0,1920,1080;0,0,1920,1080")
         self.assertEqual(heads.pointer_abs(lay, 0, 0, 0), (0, 0))
         self.assertEqual(heads.pointer_abs(lay, 1, 1919, 1079), (32767, 32767))
 
@@ -143,7 +141,6 @@ class ActHead(unittest.TestCase):
 
 
 class MultiHeadCLI(unittest.TestCase):
-    """bin/vmkit against fake QMP sockets; the harness is test_vmkit_cli's."""
     setUp, tearDown, qmp, fake, vmkit, up = (_cli.VmkitCLI.setUp, _cli.VmkitCLI.tearDown, _cli.VmkitCLI.qmp, _cli.VmkitCLI.fake,
                                               _cli.VmkitCLI.vmkit, _cli.VmkitCLI.up)
 
@@ -183,7 +180,6 @@ class MultiHeadCLI(unittest.TestCase):
         self.assertNotIn("device", self.dumps()[0])
 
     def test_head_out_of_range_never_reaches_qemu(self):
-        # QEMU 11.1.2 does not validate the index; a bad one killed the process
         self.qmp(); self.gpu(2)
         r = self.vmkit("shot", "--head", "2")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
@@ -273,11 +269,9 @@ class MultiHeadCLI(unittest.TestCase):
         self.assertTrue(d0 and all(a["device"] == "gpu0" and "head" not in a for a in d0))
         d1 = [a for ex, a in s1.requests if ex == "screendump"]
         self.assertTrue(d1 and all(a["device"] == "gpu0" and a["head"] == 1 for a in d1))
-        # the key press is in every head's action log, on the shared clock
         for h in (0, 1):
             acts = [json.loads(x) for x in read_lines(os.path.join(run, f"head{h}", "actions.jsonl"))]
             self.assertEqual([x["cmd"] for x in acts], ["keys"])
-        # --run PARENT means head 0 (so does the default); --run PARENT/head1 selects another
         r = self.vmkit("frames", "--run", run, "--action", "#0", "--offset", "+100ms", "--json")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("/head0/", r.stdout)

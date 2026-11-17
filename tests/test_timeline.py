@@ -23,7 +23,7 @@ class Offsets(unittest.TestCase):
         self.assertEqual(T.parse_offset("1.5s"), 1_500_000_000)
         self.assertEqual(T.parse_offset("+250us"), 250_000)
         self.assertEqual(T.parse_offset("7ns"), 7)
-        self.assertEqual(T.parse_offset("300"), 300 * MS)     # bare number = ms
+        self.assertEqual(T.parse_offset("300"), 300 * MS)
 
     def test_bad(self):
         for s in ["", "abc", "+ms", "1min", "++1ms"]:
@@ -43,38 +43,37 @@ class Selection(unittest.TestCase):
     F = frames([1000, 1033, 1066, 1100, 1133, 1166, 1200, 1500, 1533])
 
     def test_point_is_first_frame_at_or_after(self):
-        self.assertEqual(T.select_point(self.F, 1066 * MS)["n"], 2)       # exactly at
-        self.assertEqual(T.select_point(self.F, 1067 * MS)["n"], 3)       # just after
+        self.assertEqual(T.select_point(self.F, 1066 * MS)["n"], 2)
+        self.assertEqual(T.select_point(self.F, 1067 * MS)["n"], 3)
 
     def test_late_point_is_error(self):
-        # the first frame after +1201 ms is 299 ms late: more than max(2 x 33 ms, 100 ms)
         with self.assertRaises(T.TimelineError) as cm:
             T.select_point(self.F, 1201 * MS)
         self.assertIn("late", str(cm.exception))
-        self.assertEqual(T.select_point(self.F, 1401 * MS)["n"], 7)       # 99 ms: fine
+        self.assertEqual(T.select_point(self.F, 1401 * MS)["n"], 7)
 
     def test_late_limit_follows_the_frame_interval(self):
-        F = frames([1000, 1200, 1400, 1600, 2000, 2200])    # 5 fps: limit 2 x 200 ms
-        self.assertEqual(T.select_point(F, 1601 * MS)["n"], 4)            # 399 ms
+        F = frames([1000, 1200, 1400, 1600, 2000, 2200])
+        self.assertEqual(T.select_point(F, 1601 * MS)["n"], 4)
         with self.assertRaises(T.TimelineError):
-            T.select_point(frames([1000, 1200, 1400, 1600, 2100, 2300]), 1601 * MS)   # 499 ms
+            T.select_point(frames([1000, 1200, 1400, 1600, 2100, 2300]), 1601 * MS)
 
     def test_window_over_a_sampling_gap_is_error(self):
         F = T.Frames(self.F)
         F.gaps = [{"t_from": 1210 * MS, "t_to": 1490 * MS, "errors": 8, "reason": "screendump error: x"}]
         with self.assertRaises(T.TimelineError) as cm:
-            T.select_window(F, 1150 * MS, 1520 * MS)                      # frames on both sides
+            T.select_window(F, 1150 * MS, 1520 * MS)
         self.assertIn("gap", str(cm.exception))
         with self.assertRaises(T.TimelineError) as cm:
-            T.select(F, 1000 * MS, "+150ms..+250ms")                      # frames before the gap only
+            T.select(F, 1000 * MS, "+150ms..+250ms")
         self.assertIn("gap", str(cm.exception))
         self.assertEqual([f["n"] for f in T.select_window(F, 1033 * MS, 1100 * MS)], [1, 2, 3])
 
     def test_point_outside_recording_is_error(self):
         with self.assertRaises(T.TimelineError):
-            T.select_point(self.F, 900 * MS)          # before recording started
+            T.select_point(self.F, 900 * MS)
         with self.assertRaises(T.TimelineError):
-            T.select_point(self.F, 1534 * MS)         # after the last frame
+            T.select_point(self.F, 1534 * MS)
 
     def test_window_inclusive(self):
         got = [f["n"] for f in T.select_window(self.F, 1033 * MS, 1100 * MS)]
@@ -112,17 +111,17 @@ class Actions(unittest.TestCase):
     def test_find(self):
         self.assertEqual(T.find_action(self.A, "#0")["cmd"], "keys")
         self.assertEqual(T.find_action(self.A, "#-1")["cmd"], "type")
-        self.assertEqual(T.find_action(self.A, 0)["cmd"], "keys")       # a JSON int is an index
+        self.assertEqual(T.find_action(self.A, 0)["cmd"], "keys")
         self.assertEqual(T.find_action(self.A, -1)["cmd"], "type")
         self.assertEqual(T.find_action(self.A, "typing")["cmd"], "type")
-        for bad in ("#5", 5, "nope", "#x", "0"):                         # "0": no step labelled "0"
+        for bad in ("#5", 5, "nope", "#x", "0"):
             with self.assertRaises(T.TimelineError, msg=bad):
                 T.find_action(self.A, bad)
 
     def test_numeric_step_label(self):
         A = [{"cmd": "keys", "step": "1"}, {"cmd": "type", "step": "2"}, {"cmd": "click"}]
-        self.assertEqual(T.find_action(A, "2")["cmd"], "type")          # the label, not index 2
-        self.assertEqual(T.find_action(A, "#2")["cmd"], "click")        # the index
+        self.assertEqual(T.find_action(A, "2")["cmd"], "type")
+        self.assertEqual(T.find_action(A, "#2")["cmd"], "click")
 
     def test_repeated_label_is_ambiguous(self):
         A = [{"cmd": "keys", "step": "go"}, {"cmd": "type", "step": "go"}]

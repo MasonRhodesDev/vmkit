@@ -19,7 +19,6 @@ OCR_FONT = "DejaVu-Sans-Mono"
 
 
 def have_font(name):
-    """ImageMagick can draw with this font (`magick -list font` names it)."""
     if not HAVE_MAGICK:
         return False
     out = subprocess.run(["magick", "-list", "font"], capture_output=True, text=True).stdout
@@ -66,7 +65,6 @@ class Regions(unittest.TestCase):
         self.assertEqual(C.resolve_region(None, 100, 80), (0, 0, 100, 80))
 
     def test_negative_from_right_bottom(self):
-        # schema example: the bottom 60 px of the screen
         self.assertEqual(C.resolve_region([0, -60, 0, 60], 1280, 800), (0, 740, 1280, 60))
         self.assertEqual(C.resolve_region([-100, -50, 100, 50], 1280, 800), (1180, 750, 100, 50))
 
@@ -89,7 +87,7 @@ class Regions(unittest.TestCase):
 
     def test_near(self):
         self.assertEqual(C.near_region([50, 50], 10, 8, 8, 200, 200), (36, 36, 28, 28))
-        self.assertEqual(C.near_region([2, 2], 10, 8, 8, 200, 200), (0, 0, 16, 16))   # clamped
+        self.assertEqual(C.near_region([2, 2], 10, 8, 8, 200, 200), (0, 0, 16, 16))
 
     def test_color(self):
         self.assertEqual(C.parse_color("#00b4ff"), (0, 180, 255))
@@ -105,7 +103,6 @@ class ImageIO(Tmp):
         self.assertEqual(I.read_png(p).data, img.data)
 
     def test_png_filters_decode(self):
-        # PNG written with non-zero filters (sub/up/avg/paeth) by hand
         import struct
         import zlib
         w, h = 4, 5
@@ -149,8 +146,8 @@ class Pixel(Tmp):
     def setUp(self):
         super().setUp()
         img = solid(64, 48, (0, 0, 0))
-        img = paint(img, 10, 10, 20, 10, (0, 180, 255))     # 200 px exact
-        img = paint(img, 30, 10, 10, 10, (20, 190, 240))    # 100 px off by <= 20
+        img = paint(img, 10, 10, 20, 10, (0, 180, 255))
+        img = paint(img, 30, 10, 10, 10, (20, 190, 240))
         self.p = self.png("f.png", img)
 
     def test_exact_match(self):
@@ -159,13 +156,13 @@ class Pixel(Tmp):
         self.assertEqual(v["matched_px"], 200)
 
     def test_tolerance_is_per_channel(self):
-        self.assertFalse(C.pixel(self.p, [10, 10, 30, 10], "#00b4ff", 16, 1.0)[0])   # 20 > 16
+        self.assertFalse(C.pixel(self.p, [10, 10, 30, 10], "#00b4ff", 16, 1.0)[0])
         ok, v = C.pixel(self.p, [10, 10, 30, 10], "#00b4ff", 20, 1.0)
         self.assertTrue(ok)
         self.assertEqual(v["fraction"], 1.0)
 
     def test_min_fraction(self):
-        ok, v = C.pixel(self.p, [0, 0, 64, 48], "#00b4ff", 0, 0.05)   # 200 / 3072 = 0.065
+        ok, v = C.pixel(self.p, [0, 0, 64, 48], "#00b4ff", 0, 0.05)
         self.assertTrue(ok)
         self.assertAlmostEqual(v["fraction"], 200 / 3072, places=3)
         self.assertFalse(C.pixel(self.p, [0, 0, 64, 48], "#00b4ff", 0, 0.1)[0])
@@ -173,7 +170,7 @@ class Pixel(Tmp):
     def test_run_check_not_and_errors(self):
         spec = {"region": [10, 10, 20, 10], "color": "#00b4ff", "not": True}
         self.assertEqual(C.run_check("pixel", self.p, spec)["status"], "fail")
-        spec = {"region": [60, 40, 10, 10], "color": "#00b4ff", "not": True}   # outside -> error, even with not
+        spec = {"region": [60, 40, 10, 10], "color": "#00b4ff", "not": True}
         self.assertEqual(C.run_check("pixel", self.p, spec)["status"], "error")
         self.assertEqual(C.run_check("pixel", self.p, {"region": [0, 0, 1, 1]})["status"], "error")
 
@@ -183,8 +180,8 @@ class Changed(Tmp):
         super().setUp()
         base = solid(64, 48, (40, 40, 40))
         self.b = self.png("b.png", base)
-        self.f = self.png("f.png", paint(base, 5, 5, 10, 10, (200, 200, 200)))     # 100 px changed
-        self.faint = self.png("g.png", paint(base, 5, 5, 10, 10, (45, 45, 45)))    # below fuzz
+        self.f = self.png("f.png", paint(base, 5, 5, 10, 10, (200, 200, 200)))
+        self.faint = self.png("g.png", paint(base, 5, 5, 10, 10, (45, 45, 45)))
 
     def test_counts_changed_pixels(self):
         ok, v = C.changed(self.f, self.b, None, 50, 5)
@@ -198,7 +195,6 @@ class Changed(Tmp):
         self.assertEqual(v["changed_px"], 0)
 
     def test_fuzz(self):
-        # distance sqrt(3*25)=8.7 > 0 but < 5% of 255 = 12.75
         self.assertEqual(C.changed(self.faint, self.b, None, 1, 5)[1]["changed_px"], 0)
         self.assertEqual(C.changed(self.faint, self.b, None, 1, 1)[1]["changed_px"], 100)
 
@@ -224,7 +220,7 @@ class OCR(Tmp):
                         "second line", p], check=True)
         self.assertTrue(C.ocr(p, None, text="Hello  VMKIT")[0])
         self.assertTrue(C.ocr(p, [0, 0, 0, 60], regex=r"vmkit \d+")[0])
-        self.assertFalse(C.ocr(p, [0, 0, 0, 60], text="second")[0])        # region excludes line 2
+        self.assertFalse(C.ocr(p, [0, 0, 0, 60], text="second")[0])
         self.assertEqual(C.run_check("ocr", p, {"text": "goodbye", "not": True})["status"], "pass")
         self.assertEqual(C.run_check("ocr", p, {"text": "a", "regex": "b"})["status"], "error")
 
@@ -274,13 +270,11 @@ def write_run(d, frames_imgs, actions, t0_ms=1000, step_ms=33, inactive=()):
 
 
 class Evaluate(Tmp):
-    """Expectations over a synthetic recording: a box appears ~66 ms after the action."""
-
     def setUp(self):
         super().setUp()
         base = solid(64, 48, (0, 0, 0))
         box = paint(base, 20, 20, 10, 10, (0, 180, 255))
-        imgs = [base, base, base, base, box, box, base, base]           # frames at 1000..1231 ms (33 ms apart)
+        imgs = [base, base, base, base, box, box, base, base]
         self.run_dir = os.path.join(self.td, "run")
         ms = 1_000_000
         write_run(self.run_dir, imgs,
@@ -303,17 +297,15 @@ class Evaluate(Tmp):
         self.assertEqual(r["status"], "fail")
 
     def test_not_on_window_defaults_to_all(self):
-        # schema v0.3: not on a window = "in no frame of the window"
         box = dict(check="pixel", at="+0ms..+100ms", region=[20, 20, 10, 10], color="#00b4ff")
         r = self.ev(**box, **{"not": True})
-        self.assertEqual((r["mode"], r["status"]), ("all", "fail"))    # the box is in frames 4, 5
-        r = self.ev(**box, mode="any", **{"not": True})                  # explicit any: some frame lacks it
+        self.assertEqual((r["mode"], r["status"]), ("all", "fail"))
+        r = self.ev(**box, mode="any", **{"not": True})
         self.assertEqual((r["mode"], r["status"]), ("any", "pass"))
-        r = self.ev(**dict(box, at="+100ms..+140ms"), **{"not": True})  # frame 6 only: no box
+        r = self.ev(**dict(box, at="+100ms..+140ms"), **{"not": True})
         self.assertEqual(r["status"], "pass")
 
     def test_not_on_a_window_over_a_sampling_gap_is_error(self):
-        # frame 6 (1198 ms) lacks the box; screendump errors from 1205 to 1228 ms left no frame
         from vmkit import timeline as T
         with open(os.path.join(self.run_dir, "gaps.jsonl"), "w") as f:
             f.write(json.dumps({"t_from": 1205_000_000, "t_to": 1228_000_000, "errors": 1, "reason": "x"}) + "\n")
@@ -335,7 +327,7 @@ class Evaluate(Tmp):
     def test_anchor_ack_and_step(self):
         r = self.ev(action="open", anchor="ack", check="pixel", at="+40ms", region=[20, 20, 10, 10],
                     color="#00b4ff")
-        self.assertEqual(r["frames"][0]["n"], 5)   # 1095+40=1135 -> first frame at/after is 1165
+        self.assertEqual(r["frames"][0]["n"], 5)
         self.assertEqual(r["status"], "pass")
 
     def test_empty_window_is_error(self):
@@ -392,7 +384,7 @@ class Evaluate(Tmp):
         with open(notimg, "w") as f:
             f.write("not an image")
         frame = os.path.join(self.run_dir, "frames", "000000.png")
-        with mock.patch.object(C, "MAGICK", "magick"):     # past the "needs ImageMagick" gate
+        with mock.patch.object(C, "MAGICK", "magick"):
             r1 = C.run_check("template", frame, {"image": notimg, "region": [0, 0, 0, 0]})
             r2 = C.run_check("template", frame + ".missing", {"image": frame, "region": [0, 0, 0, 0]})
         self.assertEqual((r1["status"], r2["status"]), ("error", "error"))
@@ -410,7 +402,6 @@ class Evaluate(Tmp):
         with open(os.path.join(self.run_dir, "results.json")) as f:
             res = json.load(f)
         self.assertEqual([x["status"] for x in res], ["pass", "pass"])
-        # single-check CLI on an explicit frame: exit 1 on fail
         r = subprocess.run(cli + ["pixel", "--frame", os.path.join(self.run_dir, "frames", "000000.png"),
                                   "--region", "20,20,10,10", "--color", "#00b4ff"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 1, r.stdout)

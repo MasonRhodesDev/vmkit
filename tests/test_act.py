@@ -29,7 +29,6 @@ class ActQMP(unittest.TestCase):
         self.assertTrue(rec["ok"], rec.get("error"))
         self.assertEqual((rec["x"], rec["y"]), (50, 25))
         ev = self.events()
-        # abs move to the centre of a 101x51 frame, then press + release
         self.assertEqual([e["data"]["value"] for e in ev[0]], [16384, 16384])
         self.assertEqual([e["data"]["down"] for e in ev[1] + ev[2]], [True, False])
 
@@ -39,8 +38,6 @@ class ActQMP(unittest.TestCase):
         self.assertEqual([e["data"]["value"] for e in self.events()[0]], [32767, 0])
 
     def test_type_paces_its_chords(self):
-        # One send-key per character, in order, with TYPE_GAP between them
-        # (back-to-back chords lost a shift release in the guest).
         with mock.patch.object(act.time, "sleep") as sleep:
             rec, msg = act.run_qmp("type", ["Hi", "1"], self.sock, self.td)
         self.assertTrue(rec["ok"], rec.get("error"))

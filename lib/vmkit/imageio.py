@@ -1,12 +1,3 @@
-"""Minimal stdlib image I/O: binary PPM (P6) read/write, PNG write, PNG read.
-
-vmkit asks QEMU for PPM screendumps (PNG encoding inside QEMU costs ~30 ms per
-call and stalls the guest) and converts on the host. Everything here is 8-bit
-RGB, row-major, 3 bytes per pixel.
-
-CLI:  python3 imageio.py ppm2png IN.ppm OUT.png
-      python3 imageio.py size FILE          -> "W H" (PPM or PNG header)
-"""
 import struct
 import sys
 import zlib
@@ -15,7 +6,6 @@ PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
 
 class Image:
-    """w x h RGB image; data is bytes of length w*h*3."""
     __slots__ = ("w", "h", "data")
 
     def __init__(self, w, h, data):
@@ -37,10 +27,7 @@ class Image:
         return Image(w, h, b"".join(rows))
 
 
-# ---- PPM ---------------------------------------------------------------------
-
 def _ppm_header(buf):
-    """Parse a P6 header -> (w, h, maxval, offset of pixel data)."""
     if buf[:2] != b"P6":
         raise ValueError("not a binary PPM (P6)")
     fields, i, n = [], 2, len(buf)
@@ -58,7 +45,7 @@ def _ppm_header(buf):
             raise ValueError("truncated PPM header")
         fields.append(int(buf[i:j]))
         i = j
-    return fields[0], fields[1], fields[2], i + 1   # one whitespace byte after maxval
+    return fields[0], fields[1], fields[2], i + 1
 
 
 def parse_ppm(buf):
@@ -78,15 +65,12 @@ def ppm_bytes(img):
     return b"P6\n%d %d\n255\n" % (img.w, img.h) + img.data
 
 
-# ---- PNG ---------------------------------------------------------------------
-
 def _chunk(typ, payload):
     c = typ + payload
     return struct.pack(">I", len(payload)) + c + struct.pack(">I", zlib.crc32(c) & 0xffffffff)
 
 
 def png_bytes(img, level=3):
-    """Encode RGB as PNG (filter 0 on every row: fast in Python, lossless)."""
     stride = img.w * 3
     raw = b"".join(b"\x00" + img.data[r * stride:(r + 1) * stride] for r in range(img.h))
     return (PNG_SIG + _chunk(b"IHDR", struct.pack(">IIBBBBB", img.w, img.h, 8, 2, 0, 0, 0))
@@ -107,11 +91,6 @@ def _paeth(a, b, c):
 
 
 def parse_png(buf):
-    """Decode a non-interlaced 8-bit PNG (gray, gray+alpha, RGB, RGBA, palette) to RGB.
-
-    Pure Python: fine for small images and tests; slow (seconds) for a full
-    frame with Paeth rows. Callers with ImageMagick available should prefer it
-    for large frames (see checks.load_region)."""
     if buf[:8] != PNG_SIG:
         raise ValueError("not a PNG")
     i, idat, plte = 8, [], None
@@ -173,7 +152,6 @@ def read_png(path):
 
 
 def size(path):
-    """(w, h) from a PPM or PNG header, without decoding pixels."""
     with open(path, "rb") as f:
         head = f.read(64)
     if head[:8] == PNG_SIG:

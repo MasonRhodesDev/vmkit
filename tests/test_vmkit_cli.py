@@ -1,4 +1,3 @@
-"""bin/vmkit end to end against a fake QMP server and fake host tools (no VM)."""
 import json
 import os
 import shutil
@@ -50,7 +49,6 @@ class VmkitCLI(unittest.TestCase):
                               env=e, timeout=timeout, cwd=cwd)
 
     def fail_first_dumps(self, n):
-        """screendump returns a QMP error for the first n calls, then works."""
         calls = {"n": 0}
 
         def h(args):
@@ -60,12 +58,10 @@ class VmkitCLI(unittest.TestCase):
             return self.srv.screendump(args)
         self.srv.handlers["screendump"] = h
 
-    # ---- wait screen / watch ----------------------------------------------
-
     def test_wait_screen_retries_a_failed_screendump(self):
         self.qmp()
-        self.fail_first_dumps(2)            # dump_ppm tries with and without format
-        self.fake("magick", 'echo 0 >&2')   # frames identical
+        self.fail_first_dumps(2)
+        self.fake("magick", 'echo 0 >&2')
         r = self.vmkit("wait", "screen", "6", "2")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("screen stable", r.stdout)
@@ -79,7 +75,6 @@ class VmkitCLI(unittest.TestCase):
         self.assertEqual(os.listdir(self.shm), [])
 
     def colors(self, seq):
-        """screendump serves solid frames in these colours, the last one repeating."""
         seq = list(seq)
 
         def h(args):
@@ -87,8 +82,6 @@ class VmkitCLI(unittest.TestCase):
             return self.srv.screendump(args)
         self.srv.handlers["screendump"] = h
 
-    # `magick compare` exits 1 when the images differ (checked on IM 7.1.2); under
-    # set -euo pipefail that used to end wait screen/watch silently.
     def test_wait_screen_survives_differing_frames_fake_magick(self):
         self.qmp()
         n = os.path.join(self.td, "n")
@@ -105,7 +98,6 @@ class VmkitCLI(unittest.TestCase):
         self.assertIn("changed 3072px", r.stdout)
 
     def sizes(self, seq):
-        """screendump serves frames of these sizes in turn, cycling."""
         seq = list(seq); i = {"n": 0}
 
         def h(args):
@@ -113,8 +105,6 @@ class VmkitCLI(unittest.TestCase):
             return self.srv.screendump(args)
         self.srv.handlers["screendump"] = h
 
-    # On IM 7.1.2 `compare -metric AE` of two sizes prints "0 (0)" and exits 0,
-    # so a resolution change must be caught by comparing the dimensions.
     def test_watch_resolution_change_is_a_change(self):
         self.qmp()
         self.sizes([(64, 48), (32, 24)])
@@ -150,7 +140,7 @@ class VmkitCLI(unittest.TestCase):
     def test_wait_screen_and_watch_real_magick(self):
         self.qmp()
         black, white = (0, 0, 0), (255, 255, 255)
-        self.colors([black, white])            # differ once, then stable
+        self.colors([black, white])
         r = self.vmkit("wait", "screen", "6", "2", env={"VMKIT_STABLE_PX": "100"})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("screen stable (last diff 0px)", r.stdout)
@@ -160,13 +150,11 @@ class VmkitCLI(unittest.TestCase):
         self.assertIn("changed 3072px", r.stdout)
 
 
-    # ---- record start ------------------------------------------------------
-
     def test_record_start_timeout_kills_the_recorder_and_cleans_up(self):
         srv = FakeQMP(os.path.join(self.dir, "qmp-rec.sock"))
         self.srv = srv
 
-        def trickle(f):     # never completes a reply line (the recorder's reply deadline is 600 s)
+        def trickle(f):
             while not srv.closing.wait(0.5):
                 f.write(b" ")
         srv.handlers["screendump"] = lambda args: trickle
@@ -185,8 +173,6 @@ class VmkitCLI(unittest.TestCase):
         self.assertIn(state, ("gone", "Z"), "recorder still running")
         self.assertFalse(os.path.exists(os.path.join(self.dir, "record.pid")))
         self.assertFalse(os.path.exists(os.path.join(self.dir, "record.run")))
-        # a retry with the same --out is not refused as "already has a recording"; nor is
-        # one after a start whose recorder exited (here: QEMU closes the socket)
         srv.handlers["screendump"] = lambda args: (lambda f: f.close())
         for _ in range(2):
             r = self.vmkit("record", "start", "--out", run, timeout=40)
@@ -199,8 +185,6 @@ class VmkitCLI(unittest.TestCase):
 
     def test_record_stop_kills_a_recorder_that_ignores_term(self):
         self.srv = FakeQMP(os.path.join(self.dir, "qmp-rec.sock"))
-        # an encoder that never reads: the pipe and the queue fill, and the
-        # recorder is still waiting out its drain (10 s) when the 2 s escalation hits
         self.fake("ffmpeg", "exec sleep 300")
         run = os.path.join(self.td, "run")
         r = self.vmkit("record", "start", "--out", run)
@@ -265,17 +249,13 @@ class VmkitCLI(unittest.TestCase):
         self.assertNotIn("syntax error", r.stderr)
 
     def test_record_stop_default_waits_out_a_slow_clean_drain(self):
-        # the encoder takes 8 s to finish after its input ends (nice 19 under load)
         rp, run = self.start_recorder("cat >/dev/null; sleep 8")
         r = self.vmkit("record", "stop", env={"VMKIT_REC_STOP_TIMEOUT": ""}, timeout=90)
         self.assertNotIn("killed", r.stdout + r.stderr)
         with open(os.path.join(run, "summary.json")) as f:
             self.assertNotIn("killed", json.load(f))
 
-    # ---- scratch PPMs are removed on failure --------------------------------
-
     def dump_then(self, reply):
-        """screendump writes a (truncated) PPM, then replies `reply`."""
         def h(args):
             with open(args["filename"], "wb") as f:
                 f.write(b"P6\n64 48\n255\n" + bytes(10))
@@ -307,7 +287,7 @@ class VmkitCLI(unittest.TestCase):
 
     def test_shot_logs_valid_json_for_any_name(self):
         self.qmp()
-        name = 'a\\q"b'                                 # backslash + quote
+        name = 'a\\q"b'
         r = self.vmkit("shot", name)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         with open(os.path.join(self.dir, "actions.jsonl")) as f:
@@ -315,10 +295,7 @@ class VmkitCLI(unittest.TestCase):
         self.assertEqual([(x["cmd"], x["args"]) for x in recs], [("shot", name)])
         self.assertRegex(recs[0]["t"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
-    # ---- up ------------------------------------------------------------------
-
     def up(self, env):
-        """`vmkit up` with a fake qemu-system-x86_64 that saves its argv; returns that argv."""
         argv = os.path.join(self.td, "qemu.argv")
         self.fake("qemu-system-x86_64", f'for a in "$@"; do printf "%s\\0" "$a"; done >{argv}.tmp; mv {argv}.tmp {argv}')
         disk = os.path.join(self.td, "disk.qcow2")
@@ -345,14 +322,12 @@ class VmkitCLI(unittest.TestCase):
         self.assertEqual(argv[-6:], ["-device", "virtio-rng-pci,id=r 1", "-smp", "2", "-name", "a b"])
 
     def test_up_qemu_args_env_bad_quoting_is_an_error(self):
-        self.fake("qemu-system-x86_64", "exit 0")      # never a real qemu
+        self.fake("qemu-system-x86_64", "exit 0")
         disk = os.path.join(self.td, "disk.qcow2")
         open(disk, "w").close()
         r = self.vmkit("--overlay", disk, "up", env={"VMKIT_QEMU_ARGS": "-name 'unclosed"})
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("VMKIT_QEMU_ARGS", r.stderr)
-
-    # ---- down ----------------------------------------------------------------
 
     def fake_qemu(self, pidfile, ignore_term=False):
         code = "import signal, time\n"
@@ -361,7 +336,7 @@ class VmkitCLI(unittest.TestCase):
         code += "time.sleep(120)\n"
         p = subprocess.Popen([sys.executable, "-c", code, "qemu-system-x86_64", "-pidfile", pidfile])
         self.addCleanup(lambda: (p.kill(), p.wait()))
-        time.sleep(0.3)     # let it exec (its cmdline is python's by then)
+        time.sleep(0.3)
         return p
 
     def write_pidfile(self, pid):
@@ -370,7 +345,7 @@ class VmkitCLI(unittest.TestCase):
 
     def test_down_does_not_signal_another_vms_qemu(self):
         other = self.fake_qemu(os.path.join(self.td, "other", "qemu.pid"))
-        self.write_pidfile(other.pid)                   # stale pidfile, pid reused by another qemu
+        self.write_pidfile(other.pid)
         r = self.vmkit("down", env={"VMKIT_DOWN_TIMEOUT": "1"})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIsNone(other.poll(), "signalled a qemu that is not this VM's")
@@ -386,7 +361,7 @@ class VmkitCLI(unittest.TestCase):
         self.assertFalse(os.path.exists(pidfile), "pidfile left after SIGKILL")
 
     def test_down_matches_the_pidfile_however_dir_is_spelled(self):
-        pidfile = os.path.join(self.dir, "qemu.pid")         # `up` ran with an absolute --dir
+        pidfile = os.path.join(self.dir, "qemu.pid")
         q = self.fake_qemu(pidfile, ignore_term=True)
         self.write_pidfile(q.pid)
         r = self.vmkit("down", env={"VMKIT_DOWN_TIMEOUT": "1"}, timeout=40, dir="./d", cwd=self.td)
@@ -396,7 +371,7 @@ class VmkitCLI(unittest.TestCase):
     def test_down_without_pidfile_waits_on_qmp(self):
         srv = self.qmp()
 
-        def powerdown(args):          # the guest shuts down: QEMU goes away shortly after replying
+        def powerdown(args):
             def w(f):
                 f.write(b'{"return": {}}\n')
                 threading.Timer(0.5, srv.stop).start()
@@ -407,7 +382,7 @@ class VmkitCLI(unittest.TestCase):
         self.assertEqual(r.stdout.strip(), "down")
 
     def test_down_without_pidfile_and_qemu_still_up_is_unknown(self):
-        self.qmp()                    # answers, ignores the powerdown
+        self.qmp()
         r = self.vmkit("down", env={"VMKIT_DOWN_TIMEOUT": "2"})
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertNotIn("down", r.stdout.split())

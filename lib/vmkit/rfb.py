@@ -26,7 +26,6 @@ def _read(s, n):
 
 
 def set_size(target, w, h, timeout=10.0):
-    """target: a unix socket path or a TCP port on 127.0.0.1. Raises OSError on failure."""
     if str(target).isdigit():
         s = socket.create_connection(("127.0.0.1", int(target)), timeout=timeout)
     else:
@@ -42,13 +41,13 @@ def set_size(target, w, h, timeout=10.0):
         s.sendall(b"\x01")
         if _read(s, 4) != b"\0\0\0\0":
             raise OSError("vnc security handshake failed")
-        s.sendall(b"\x01")                                    # ClientInit: shared
-        _read(s, 20)                                           # width, height, pixel format
-        _read(s, struct.unpack(">I", _read(s, 4))[0])          # name
-        encs = (-308, 0)                                       # ExtendedDesktopSize, raw
+        s.sendall(b"\x01")
+        _read(s, 20)
+        _read(s, struct.unpack(">I", _read(s, 4))[0])
+        encs = (-308, 0)
         s.sendall(struct.pack(">BxH", 2, len(encs)) + b"".join(struct.pack(">i", e) for e in encs))
         s.sendall(struct.pack(">BxHHBx", 251, w, h, 1) + struct.pack(">IHHHHI", 0, 0, 0, w, h, 0))
-        time.sleep(0.5)          # let QEMU apply it before the connection goes away
+        time.sleep(0.5)
     finally:
         s.close()
 

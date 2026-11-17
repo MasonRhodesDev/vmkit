@@ -1,4 +1,3 @@
-# vmkit runtime artifacts
 .vmkit/
 *.png
 *.ppm
